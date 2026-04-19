@@ -13,10 +13,10 @@ except ImportError:
     raise ImportError("Transformers not installed. Make sure you installed aidan-lib[hf]")
 
 
-BboxEmbeddingMap = dict[Tuple[int, int, int, int], torch.Tensor]
+DINOv3BboxEmbeddingMap = dict[Tuple[int, int, int, int], torch.Tensor]
 
 @dataclass
-class DinoSegmentation:
+class DINOv3Segmentation:
     person_id: int
     dino_embeddings: torch.Tensor
     dino_overlaps: torch.Tensor
@@ -31,7 +31,7 @@ DINOv3Checkpoint = Literal[
     "facebook/dinov3-vit7b16-pretrain-lvd1689m",
 ]
 
-DINOv3EmbeddingSizeMap: dict[DINOv3Checkpoint, int] = {
+DINOv3EmbeddingDimMap: dict[DINOv3Checkpoint, int] = {
     "facebook/dinov3-vits16-pretrain-lvd1689m": 384,
     "facebook/dinov3-vits16plus-pretrain-lvd1689m": 384,
     "facebook/dinov3-vitb16-pretrain-lvd1689m": 768,
@@ -49,12 +49,20 @@ DINOv3PatchSizeMap: dict[DINOv3Checkpoint, int] = {
     "facebook/dinov3-vit7b16-pretrain-lvd1689m": 16,
 }
 
-class DinoHarness:
+class DINOv3Harness:
+    max_side_len: int
+    checkpoint: DINOv3Checkpoint
+    embedding_dim: int
+    patch_size: int
+    model: torch.nn.Module
+    device: torch.device
+    
+
     def __init__(self, checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", max_side_len=1024):
         self.device = torch.device(device)
         self.max_side_len = max_side_len
         self.checkpoint = checkpoint
-        self.embedding_size = DINOv3EmbeddingSizeMap[checkpoint]
+        self.embedding_dim = DINOv3EmbeddingDimMap[checkpoint]
         self.patch_size = DINOv3PatchSizeMap[checkpoint]
 
         # Bypass the slow processor, only load the model
@@ -157,7 +165,7 @@ class DinoHarness:
         self, 
         images: list[torch.Tensor] | list[torch.Tensor],  
         segs: list[np.ndarray] | list[torch.Tensor]
-    ) -> list[list[DinoSegmentation]]:
+    ) -> list[list[DINOv3Segmentation]]:
         """
         Uses GPU-accelerated Average Pooling to instantly map masks to patch embeddings.
         """
@@ -216,7 +224,7 @@ class DinoHarness:
                 dino_embeddings = embeddings[valid_y, valid_x]
 
                 image_dino_segmentations.append(
-                    DinoSegmentation(person_id.item(), dino_embeddings, dino_overlaps, dino_bboxes)
+                    DINOv3Segmentation(person_id.item(), dino_embeddings, dino_overlaps, dino_bboxes)
                 )
             
             dino_segmentations.append(image_dino_segmentations)
@@ -227,7 +235,7 @@ class DinoHarness:
         self, 
         images: list[torch.Tensor] | list[torch.Tensor],  
         segs: list[np.ndarray] | list[torch.Tensor]
-    ) -> list[list[DinoSegmentation]]:
+    ) -> list[list[DINOv3Segmentation]]:
         
         features_list, _, grid_sizes, original_sizes = self.extract_patch_features(images)
         dino_segmentations = []
@@ -278,6 +286,23 @@ class DinoHarness:
             ])
                 
         return dino_segmentations
+
+    def embed_pooled(self, imgs: list[Image.Image] | list[torch.Tensor] | torch.Tensor) -> torch.Tensor:
+        if isinstance(imgs, torch.Tensor):
+            batched_images = imgs.to(self.device)
+            if batched_images.dim() == 3:
+                batched_images = batched_images.unsqueeze(0)
+            if batched_images.dtype not in (torch.float32, torch.float16):
+                batched_images = batched_images.float() / 255.0
+            batched_images = (batched_images - self.mean) / self.std
+        else:
+            batched_images, _, _ = self.preprocess_images(imgs)
+
+        with torch.no_grad():
+            outputs = self.model(pixel_values=batched_images)
+            cls_tokens = outputs.last_hidden_state[:, 0, :]
+            
+        return cls_tokens
 
 if __name__ == "__main__":
     import time

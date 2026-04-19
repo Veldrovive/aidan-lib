@@ -10,15 +10,15 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.4.4",
     "pydantic>=2.13.2",
-    "torch>=2.9.1",
+    "torch==2.9.1",
     "torchvision>=0.24.1",
 ]
 
 [project.optional-dependencies]
 hf = [
     "transformers>=5.5.4",
+    "accelerate>=1.13.0",
     "datasets>=4.8.4",
-    "accelerate>=1.13.0"
 ]
 
 [build-system]
