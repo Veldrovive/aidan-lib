@@ -282,7 +282,7 @@ class DINOv3Harness:
             dino_embeddings = features_list[img_idx][valid_y, valid_x]
 
             dino_segmentations.append([
-                DinoSegmentation(1, dino_embeddings, dino_overlaps, dino_bboxes)
+                DINOv3Segmentation(1, dino_embeddings, dino_overlaps, dino_bboxes)
             ])
                 
         return dino_segmentations
@@ -326,7 +326,7 @@ if __name__ == "__main__":
     PIL_mock_images = [TF.to_pil_image(img) for img in mock_images]
 
     print("Initializing Models (This takes a moment)...")
-    harness = DinoHarness(device=device)
+    harness = DINOv3Harness(device=device)
 
     print("\n--- Running Optimized Harness ---")
     start = time.perf_counter()
