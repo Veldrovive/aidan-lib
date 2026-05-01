@@ -69,7 +69,7 @@ class SAM3Harness:
         # Initialize Meta's multiplex video predictor
         print(f"Constructing multiplex predictor")
         print(f"WARNING: DISABLING FA3")
-        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=False)
+        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=False, compile=True, warm_up=True)
         print(f"Created multiplex predictor")
 
     def _parse_meta_outputs(self, outputs) -> tuple[dict[int, np.ndarray], dict[int, float]]:
@@ -279,6 +279,49 @@ class SAM3Harness:
             prompt_to_obj_ids=prompt_to_obj_ids,
             video_frame_indices=frame_indices,
         )
+
+    def inject_mask_prompt(self, session_id: str, frame_idx: int, obj_id: int, mask: torch.Tensor):
+        """
+        Hacky way to add a mask prompt to Sam3MultiplexVideoPredictor.
+        
+        Args:
+            session_id (str): The active session ID
+            frame_idx (int): The frame index to apply the mask to
+            obj_id (int): The object ID to assign this mask to
+            mask (torch.Tensor): A 2D boolean or float tensor of shape [H, W]
+        """
+        # 1. Retrieve the high-level inference state for the session
+        session = self.predictor._get_session(session_id)
+        inference_state = session["state"]
+        model = self.predictor.model  # Sam3MultiplexTracking
+        assert model is not None, "Model not found"
+        
+        # Ensure mask is a tensor and on the correct device
+        if not isinstance(mask, torch.Tensor):
+            mask = torch.tensor(mask)
+        mask = mask.to(inference_state["device"]).float()
+        
+        # # 2. In multiplex mode, objects are bucketed. 
+        # # Get or create the specific SAM 2 state bucket for this object.
+        # sam2_state, _ = model._get_or_create_sam2_state_for_obj(
+        #     inference_state, frame_idx, obj_id
+        # )
+        
+        # 3. Call the underlying SAM 2 tracker's add_new_mask method directly
+        # This will overwrite any existing points/masks for this object on this frame
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            frame_idx, obj_ids, low_res_masks, video_res_masks = model.tracker.add_new_mask(
+                inference_state=inference_state,
+                frame_idx=frame_idx,
+                obj_id=obj_id,
+                mask=mask
+            )
+            
+        # 4. Optional: If you are doing this mid-tracking, you may want to update the multiplex metadata.
+        # We update the last use time to prevent session expiration.
+        self.predictor._extend_expiration_time(session)
+        
+        return video_res_masks
 
 if __name__ == "__main__":
     def test():

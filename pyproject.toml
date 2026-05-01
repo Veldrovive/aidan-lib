@@ -35,7 +35,7 @@ sam3 = [
     "imageio[pyav]>=2.37.3",
 ]
 sam3_reseach = [
-    "aidan-lib[sam3]",
+    "aidan-lib[sam3,science]",
     "sam3",
     "opencv-python>=4.13.0.92",
     "einops>=0.8.2",
@@ -45,6 +45,12 @@ sam3_reseach = [
 transnet = [
     "aidan-lib[torch]",
     "transnetv2-pytorch>=1.0.5",
+]
+science = [
+    "scipy>=1.17.1",
+]
+dev = [
+    "ipykernel>=7.2.0",
 ]
 
 [build-system]
