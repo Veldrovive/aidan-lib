@@ -69,7 +69,7 @@ class SAM3Harness:
         # Initialize Meta's multiplex video predictor
         print(f"Constructing multiplex predictor")
         print(f"WARNING: DISABLING FA3")
-        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=False, compile=True, warm_up=True)
+        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=False, compile=False, warm_up=False)
         print(f"Created multiplex predictor")
 
     def _parse_meta_outputs(self, outputs) -> tuple[dict[int, np.ndarray], dict[int, float]]:
