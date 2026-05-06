@@ -76,12 +76,8 @@ class SAM3BatchedImageHarness(BaseSAM3ImageHarness):
         self.device = torch.device(device)
         self.dtype = dtype
 
-        if bpe_path is None:
-            sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")
-            bpe_path = os.path.join(sam3_root, "assets", "bpe_simple_vocab_16e6.txt.gz")
-
         print("Constructing SAM3 Image Model...")
-        self.model = build_sam3_image_model(bpe_path=str(bpe_path))
+        self.model = build_sam3_image_model(bpe_path=bpe_path)
         self.model.to(device=self.device, dtype=self.dtype)
         self.model.eval()
 
