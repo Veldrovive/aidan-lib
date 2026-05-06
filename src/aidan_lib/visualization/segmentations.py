@@ -134,3 +134,25 @@ def visualize_segmentations_pil(
     viz = visualize_segmentations(image, masks, colors, labels, alpha)
     assert isinstance(viz, Image.Image)
     return viz
+
+def int_mask_to_binary_masks(
+    int_mask: np.ndarray,
+    background_index: int | None = None
+) -> Tuple[List[np.ndarray], List[int]]:
+    """
+    Converts a 2D integer array mask to a list of binary masks and their corresponding unique values.
+    
+    Args:
+        int_mask: Integer numpy array.
+        background_index: Optional index to ignore (typically for background).
+        
+    Returns:
+        A tuple containing:
+            - A list of binary masks.
+            - A list of the corresponding unique values for each mask.
+    """
+    unique_vals = np.unique(int_mask)
+    if background_index is not None:
+        unique_vals = unique_vals[unique_vals != background_index]
+        
+    return [int_mask == val for val in unique_vals], unique_vals.tolist()
