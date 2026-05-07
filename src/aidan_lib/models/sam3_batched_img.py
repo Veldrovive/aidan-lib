@@ -1,121 +1,86 @@
-from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
+from sam3.train.data.sam3_image_dataset import InferenceMetadata, FindQueryLoaded, Image as SAMImage, Datapoint
+from sam3.train.data.collator import collate_fn_api as collate
+from sam3.model.utils.misc import copy_data_to_device
+from sam3 import build_sam3_image_model
+from sam3.eval.postprocessors import PostProcessImage
+from sam3.train.transforms.basic_for_api import ComposeAPI, RandomResizeAPI, ToTensorAPI, NormalizeAPI
+
 from PIL import Image
-from typing import Union, List, Dict, Tuple, Any
-import numpy as np
+from pathlib import Path
+from jaxtyping import Float, Int, Bool
+
 import torch
-import os
-
-try:
-    import sam3
-    from sam3 import build_sam3_image_model
-    from sam3.train.data.sam3_image_dataset import InferenceMetadata, FindQueryLoaded, Image as SAMImage, Datapoint
-    from sam3.train.transforms.basic_for_api import ComposeAPI, RandomResizeAPI, ToTensorAPI, NormalizeAPI
-    from sam3.eval.postprocessors import PostProcessImage
-    from sam3.train.data.collator import collate_fn_api as collate
-    from sam3.model.utils.misc import copy_data_to_device
-except ImportError:
-    raise ImportError("Meta SAM3 not installed. Make sure you installed it via 'pip install git+https://github.com/facebookresearch/sam3.git'")
-
 
 @dataclass
-class VisualPrompt:
-    """Represents a visual prompt consisting of bounding boxes and positive/negative labels."""
-    boxes: List[List[float]]  # Expected in [X1, Y1, X2, Y2] format
-    labels: List[bool]        # True for positive inclusion, False for exclusion
-    text: str = "visual"      # Optional textual hint for the visual boxes
+class SAM3ImageResult:
+    scores: Float[torch.Tensor, "num_segments"]
+    labels: Int[torch.Tensor, "num_segments"]
+    boxes: Float[torch.Tensor, "num_segments 4"]
+    masks: Bool[torch.Tensor, "num_segments H W"]
 
-
-@dataclass
-class ImageQuery:
-    """Represents a single image and all the queries to be run against it."""
-    image: Union[Path, str, Image.Image]
-    text_prompts: List[str] = field(default_factory=list)
-    visual_prompts: List[VisualPrompt] = field(default_factory=list)
-
-
-@dataclass
-class QueryResult:
-    """The segmentation result for a specific prompt on an image."""
-    masks: np.ndarray    # Binary masks of shape [N, H, W]
-    scores: np.ndarray   # Confidence scores of shape [N]
-    boxes: np.ndarray    # Bounding boxes of shape [N, 4]
-
-
-@dataclass
-class SAM3ImageOutput:
-    """The combined output for a single image, mapped back to the original prompts."""
-    text_results: Dict[str, QueryResult]
-    visual_results: List[QueryResult]  # Ordered identically to the input visual_prompts
-
-
-class BaseSAM3ImageHarness(ABC):
-    @abstractmethod
-    def predict(self, queries: List[ImageQuery]) -> List[SAM3ImageOutput]:
-        pass
-
-    def __call__(self, queries: Union[ImageQuery, List[ImageQuery]]) -> Union[SAM3ImageOutput, List[SAM3ImageOutput]]:
-        is_single = isinstance(queries, ImageQuery)
-        if is_single:
-            queries = [queries]
-        
-        results = self.predict(queries)
-        return results[0] if is_single else results
-
-
-class SAM3BatchedImageHarness(BaseSAM3ImageHarness):
-    def __init__(
-        self,
-        bpe_path: Union[str, Path, None] = None,
-        device: Union[str, torch.device] = "cuda",
-        dtype: torch.dtype = torch.bfloat16,
-        detection_threshold: float = 0.5,
-        image_size: int = 1008,
-    ):
-        self.device = torch.device(device)
-        self.dtype = dtype
-
-        print("Constructing SAM3 Image Model...")
-        self.model = build_sam3_image_model(bpe_path=bpe_path)
-        self.model.to(device=self.device, dtype=self.dtype)
+class SAM3BatchedImageHarness:
+    def __init__(self, device: str | torch.device = "cuda", dtype: torch.dtype = torch.bfloat16, model_compile=False):
+        print(f"Building SAM3 image model with {dtype} precision")
+        self.model = build_sam3_image_model(bpe_path=None, compile=model_compile)
+        print(f"Built model, now moving to device {device} with {dtype} precision")
+        self.model.to(device)
         self.model.eval()
+        print(f"Finished loading model")
+        self.dtype = dtype
+        self.device = torch.device(device)
+
+        self.postprocessor = PostProcessImage(
+            max_dets_per_img=-1,       # if this number is positive, the processor will return topk. For this demo we instead limit by confidence, see below
+            iou_type="segm",           # we want masks
+            use_original_sizes_box=True,   # our boxes should be resized to the image size
+            use_original_sizes_mask=True,   # our masks should be resized to the image size
+            convert_mask_to_rle=False, # the postprocessor supports efficient conversion to RLE format. In this demo we prefer the binary format for easy plotting
+            detection_threshold=0.5,   # Only return confident detections
+            to_cpu=False,
+        )
 
         self.transform = ComposeAPI(
             transforms=[
-                RandomResizeAPI(sizes=image_size, max_size=image_size, square=True, consistent_transform=False),
+                RandomResizeAPI(sizes=1008, max_size=1008, square=True, consistent_transform=False),
                 ToTensorAPI(),
                 NormalizeAPI(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ]
         )
 
-        self.postprocessor = PostProcessImage(
-            max_dets_per_img=-1,
-            iou_type="segm",
-            use_original_sizes_box=True,
-            use_original_sizes_mask=True,
-            convert_mask_to_rle=False,
-            detection_threshold=detection_threshold,
-            to_cpu=True,
-        )
+        self.image_id_counter = 0
 
-    def _load_image(self, img_input: Union[Path, str, Image.Image]) -> Image.Image:
-        if isinstance(img_input, (str, Path)):
-            return Image.open(img_input).convert("RGB")
-        return img_input
+    def _create_empty_datapoint(self):
+        """ A datapoint is a single image on which we can apply several queries at once. """
+        return Datapoint(find_queries=[], images=[])
 
-    def _add_text_prompt(self, datapoint: Datapoint, text_query: str, query_id: int):
+    def _set_image(self, datapoint, pil_image):
+        """ Add the image to be processed to the datapoint """
+        w,h = pil_image.size
+        datapoint.images = [SAMImage(data=pil_image, objects=[], size=[h,w])]
+
+    def _add_text_prompt(self, datapoint, text_query):
+        """ Add a text query to the datapoint """
+
+        # in this function, we require that the image is already set.
+        # that's because we'll get its size to figure out what dimension to resize masks and boxes
+        # In practice you're free to set any size you want, just edit the rest of the function
+        assert len(datapoint.images) == 1, "please set the image first"
+
+        image_id = self.image_id_counter
+        self.image_id_counter += 1
+
         w, h = datapoint.images[0].size
         datapoint.find_queries.append(
             FindQueryLoaded(
                 query_text=text_query,
                 image_id=0,
-                object_ids_output=[], 
-                is_exhaustive=True, 
+                object_ids_output=[], # unused for inference
+                is_exhaustive=True, # unused for inference
                 query_processing_order=0,
                 inference_metadata=InferenceMetadata(
-                    coco_image_id=query_id,
-                    original_image_id=query_id,
+                    coco_image_id=image_id,
+                    original_image_id=image_id,
                     original_category_id=1,
                     original_size=[w, h],
                     object_id=0,
@@ -123,110 +88,42 @@ class SAM3BatchedImageHarness(BaseSAM3ImageHarness):
                 )
             )
         )
+        return image_id
 
-    def _add_visual_prompt(self, datapoint: Datapoint, vis_prompt: VisualPrompt, query_id: int):
-        w, h = datapoint.images[0].size
-        
-        if len(vis_prompt.boxes) != len(vis_prompt.labels):
-            raise ValueError(f"Boxes and labels must have the same length. Got {len(vis_prompt.boxes)} boxes and {len(vis_prompt.labels)} labels.")
+    @torch.no_grad()
+    def __call__(self, images: list[Image.Image] | list[Path], prompt: str, move_to_cpu: bool = True):
+        datapoints = []
+        datapoint_ids = []
+        for image in images:
+            if isinstance(image, Path):
+                image = Image.open(image)
+            image = image.convert("RGB")
             
-        labels_tensor = torch.tensor(vis_prompt.labels, dtype=torch.bool).view(-1)
-        boxes_tensor = torch.tensor(vis_prompt.boxes, dtype=torch.float).view(-1, 4)
+            datapoint = self._create_empty_datapoint()
+            self._set_image(datapoint, image)
+            image_id = self._add_text_prompt(datapoint, prompt)
+            datapoint = self.transform(datapoint)
 
-        datapoint.find_queries.append(
-            FindQueryLoaded(
-                query_text=vis_prompt.text,
-                image_id=0,
-                object_ids_output=[],
-                is_exhaustive=True,
-                query_processing_order=0,
-                input_bbox=boxes_tensor,
-                input_bbox_label=labels_tensor,
-                inference_metadata=InferenceMetadata(
-                    coco_image_id=query_id,
-                    original_image_id=query_id,
-                    original_category_id=1,
-                    original_size=[w, h],
-                    object_id=0,
-                    frame_index=0,
-                )
-            )
-        )
+            datapoints.append(datapoint)
+            datapoint_ids.append(image_id)
 
-    def predict(self, queries: List[ImageQuery]) -> List[SAM3ImageOutput]:
-        if not queries:
-            return []
-
-        datapoints: List[Datapoint] = []
-        query_id_counter = 1
-        query_id_mapping: Dict[int, Tuple[int, str, Any]] = {}
-
-        # 1. Build Datapoints
-        for img_idx, query in enumerate(queries):
-            dp = Datapoint(find_queries=[], images=[])
-            pil_img = self._load_image(query.image)
-            w, h = pil_img.size
-            dp.images = [SAMImage(data=pil_img, objects=[], size=[h, w])]
-
-            for text_prompt in query.text_prompts:
-                self._add_text_prompt(dp, text_prompt, query_id_counter)
-                query_id_mapping[query_id_counter] = (img_idx, "text", text_prompt)
-                query_id_counter += 1
-
-            for vis_idx, vis_prompt in enumerate(query.visual_prompts):
-                self._add_visual_prompt(dp, vis_prompt, query_id_counter)
-                query_id_mapping[query_id_counter] = (img_idx, "visual", vis_idx)
-                query_id_counter += 1
-
-            dp = self.transform(dp)
-            datapoints.append(dp)
-
-        # 2. Collate & Move to Device
         batch = collate(datapoints, dict_key="dummy")["dummy"]
         batch = copy_data_to_device(batch, self.device, non_blocking=True)
-
-        # 3. Forward Pass
-        with torch.autocast(self.device.type, dtype=self.dtype), torch.inference_mode():
+        
+        with torch.inference_mode(), torch.autocast(self.device.type, self.dtype, enabled=self.device != torch.device("cpu")):
             output = self.model(batch)
+            processed_results = self.postprocessor.process_results(output, batch.find_metadatas)
 
-        # 4. Post-process
-        processed_results = self.postprocessor.process_results(output, batch.find_metadatas)
-
-        # 5. Route results back to original query structures
-        outputs = [
-            SAM3ImageOutput(
-                text_results={}, 
-                visual_results=[None] * len(q.visual_prompts)
-            ) for q in queries
-        ]
-
-        for q_id, (img_idx, p_type, p_key) in query_id_mapping.items():
-            if q_id not in processed_results:
-                continue
-            
-            raw_res = processed_results[q_id]
-            
-            # Safely extract and format tensors to numpy arrays
-            masks = raw_res.get("masks", torch.empty(0))
-            scores = raw_res.get("scores", torch.empty(0))
-            boxes = raw_res.get("boxes", torch.empty(0))
-
-            if isinstance(masks, torch.Tensor):
-                masks = masks.numpy()
-                if masks.ndim == 4 and masks.shape[1] == 1:
-                    masks = masks.squeeze(1)  # Remove channel dim for binary masks [N, H, W]
-            
-            if isinstance(scores, torch.Tensor):
-                scores = scores.numpy()
-                
-            if isinstance(boxes, torch.Tensor):
-                boxes = boxes.numpy()
-
-            q_result = QueryResult(masks=masks, scores=scores, boxes=boxes)
-
-            if p_type == "text":
-                outputs[img_idx].text_results[p_key] = q_result
-            elif p_type == "visual":
-                outputs[img_idx].visual_results[p_key] = q_result
-
-        return outputs
+        results = []
+        for datapoint_id in datapoint_ids:
+            processed_result = processed_results[datapoint_id]
+            move_to_device = lambda x: x.to("cpu") if move_to_cpu else x
+            result = SAM3ImageResult(
+                scores=move_to_device(processed_result["scores"]),
+                labels=move_to_device(processed_result["labels"]),
+                boxes=move_to_device(processed_result["boxes"]),
+                masks=move_to_device(processed_result["masks"]).squeeze(1),
+            )
+            results.append(result)
+        
+        return results

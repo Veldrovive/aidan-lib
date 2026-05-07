@@ -48,6 +48,9 @@ transnet = [
 ]
 science = [
     "scipy>=1.17.1",
+    "matplotlib>=3.10.9",
+    "scikit-image>=0.26.0",
+    "scikit-learn>=1.8.0",
 ]
 dev = [
     "ipykernel>=7.2.0",
