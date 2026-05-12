@@ -40,10 +40,17 @@ class SAM3BatchedImageHarness:
             to_cpu=False,
         )
 
-        self.transform = ComposeAPI(
+        self.is_pil_transform = ComposeAPI(
             transforms=[
                 RandomResizeAPI(sizes=1008, max_size=1008, square=True, consistent_transform=False),
                 ToTensorAPI(),
+                NormalizeAPI(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+            ]
+        )
+
+        self.is_tensor_transform = ComposeAPI(
+            transforms=[
+                RandomResizeAPI(sizes=1008, max_size=1008, square=True, consistent_transform=False, v2=True),
                 NormalizeAPI(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ]
         )
@@ -54,10 +61,13 @@ class SAM3BatchedImageHarness:
         """ A datapoint is a single image on which we can apply several queries at once. """
         return Datapoint(find_queries=[], images=[])
 
-    def _set_image(self, datapoint, pil_image):
+    def _set_image(self, datapoint, image: Image.Image | torch.Tensor):
         """ Add the image to be processed to the datapoint """
-        w,h = pil_image.size
-        datapoint.images = [SAMImage(data=pil_image, objects=[], size=[h,w])]
+        if isinstance(image, Image.Image):
+            w, h = image.size
+        elif isinstance(image, torch.Tensor):
+            h, w = image.shape[1], image.shape[2]
+        datapoint.images = [SAMImage(data=image, objects=[], size=(h, w))]
 
     def _add_text_prompt(self, datapoint, text_query):
         """ Add a text query to the datapoint """
@@ -82,7 +92,7 @@ class SAM3BatchedImageHarness:
                     coco_image_id=image_id,
                     original_image_id=image_id,
                     original_category_id=1,
-                    original_size=[w, h],
+                    original_size=(w, h),
                     object_id=0,
                     frame_index=0,
                 )
@@ -91,18 +101,27 @@ class SAM3BatchedImageHarness:
         return image_id
 
     @torch.no_grad()
-    def __call__(self, images: list[Image.Image] | list[Path], prompt: str, move_to_cpu: bool = True):
+    def __call__(self, images: list[Image.Image] | list[Path] | list[torch.Tensor], prompt: str, move_to_cpu: bool = True) -> list[SAM3ImageResult]:
         datapoints = []
         datapoint_ids = []
         for image in images:
             if isinstance(image, Path):
                 image = Image.open(image)
-            image = image.convert("RGB")
+                image = image.convert("RGB")
+                is_pil = True
+            elif isinstance(image, Image.Image):
+                image = image.convert("RGB")
+                is_pil = True
+            else:
+                is_pil = False
             
             datapoint = self._create_empty_datapoint()
             self._set_image(datapoint, image)
             image_id = self._add_text_prompt(datapoint, prompt)
-            datapoint = self.transform(datapoint)
+            if is_pil:
+                datapoint = self.is_pil_transform(datapoint)
+            else:
+                datapoint = self.is_tensor_transform(datapoint)
 
             datapoints.append(datapoint)
             datapoint_ids.append(image_id)
