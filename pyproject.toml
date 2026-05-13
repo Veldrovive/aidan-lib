@@ -12,6 +12,7 @@ dependencies = [
     "h5py>=3.16.0",
     "numpy>=2.4.4",
     "pydantic>=2.13.2",
+    "tensorrt>=10.16.1.11",
 ]
 
 [project.optional-dependencies]
