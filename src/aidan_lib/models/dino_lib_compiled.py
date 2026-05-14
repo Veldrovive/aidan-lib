@@ -3,6 +3,7 @@ import torch_tensorrt
 import torchvision.transforms.v2.functional as Fv2
 import torch.nn.functional as F
 from typing import Literal
+import torch._dynamo as dynamo
 
 from jaxtyping import Float, Bool
 
@@ -10,6 +11,8 @@ try:
     from transformers import AutoModel
 except ImportError:
     raise ImportError("Transformers not installed. Make sure you installed aidan-lib[hf]")
+
+from aidan_lib.definitions import DINOV3_DIR, DINOV3_VITS16_URL, DINOV3_VITS16_PLUS_URL, DINOV3_VITB16_URL, DINOV3_VITL16_URL, DINOV3_VITH16PLUS_URL, DINOV3_VIT7B16_URL
 
 TorchImage = Float[torch.Tensor, "3 H W"]
 TorchMask = Bool[torch.Tensor, "H W"]
@@ -22,6 +25,15 @@ DINOv3Checkpoint = Literal[
     "facebook/dinov3-vith16plus-pretrain-lvd1689m",
     "facebook/dinov3-vit7b16-pretrain-lvd1689m",
 ]
+
+DINOv3URLMap: dict[DINOv3Checkpoint, str | None] = {
+    "facebook/dinov3-vits16-pretrain-lvd1689m": DINOV3_VITS16_URL,
+    "facebook/dinov3-vits16plus-pretrain-lvd1689m": DINOV3_VITS16_PLUS_URL,
+    "facebook/dinov3-vitb16-pretrain-lvd1689m": DINOV3_VITB16_URL,
+    "facebook/dinov3-vitl16-pretrain-lvd1689m": DINOV3_VITL16_URL,
+    "facebook/dinov3-vith16plus-pretrain-lvd1689m": DINOV3_VITH16PLUS_URL,
+    "facebook/dinov3-vit7b16-pretrain-lvd1689m": DINOV3_VIT7B16_URL,
+}
 
 DINOv3EmbeddingDimMap: dict[DINOv3Checkpoint, int] = {
     "facebook/dinov3-vits16-pretrain-lvd1689m": 384,
@@ -145,6 +157,7 @@ def get_compiled_dino(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pre
     # print(dummy_non_compiled_output[0].shape)
 
     print("Compiling model with Torch-TensorRT backend...")
+    # TODO: Dig through the hf code to extract the actual model skipping the stuff on the ends that breaks the compile
     compiled_model = torch.compile(base_model, backend="tensorrt")
 
     print("Performing warmup pass...")
@@ -202,3 +215,70 @@ def get_onnx_dino(checkpoint: str = "onnx-community/dinov3-vits16-pretrain-lvd16
     
     print("ONNX loading and warmup complete.")
     return wrapped_model
+
+def get_dino_from_repo(checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda"):
+    dinov3_vits16 = torch.hub.load(DINOV3_DIR, 'dinov3_vits16', source='local', weights="https://dinov3.llamameta.net/dinov3_vits16/dinov3_vits16_pretrain_lvd1689m-08c60483.pth?Policy=eyJTdGF0ZW1lbnQiOlt7InVuaXF1ZV9oYXNoIjoiYm12Y2VweXAwdzNwcWlrM3dzeTJ3NGhlIiwiUmVzb3VyY2UiOiJodHRwczpcL1wvZGlub3YzLmxsYW1hbWV0YS5uZXRcLyoiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3Nzg5NTAxNjJ9fX1dfQ__&Signature=XE-9Hdtv3bD6-ozPm9kDYeovRuaNnnzgYRzgCGErXz0hYpQ3FH-b82Wj4ZCqsEuSneMfeMeJgeGAev3DFcATZx0Fy6LbnC9ZKADxmrUOr7A5TgGCpFwdJEA%7Eo5KlRLYNVQNvuUj0oMUc4KxyDKnrdZybBRn-8hIfQOZSn1BnXVKn5Af-XinmWc6fuXUtRMh8bnSi%7EAvmZd6mer1ReDSZW2iqdvUZyQ7foi4MRhSWRiA02pZlaCzAd9HeNlSuHSmxr5Nhaq60zyt-yqOU7k8TH-BaXT39a5JuJKR51lkiM1X8avFQBIOWAuX73DVlwVq%7EjpZIj9-dlvo1HZ%7E7WGpIdg__&Key-Pair-Id=K15QRJLYKIFSLZ&Download-Request-ID=982572787689703").to(device).eval()
+    return dinov3_vits16
+
+# def get_compiled_dino_from_repo(checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", max_side_len=1024, warmup_batch_size=64, warmup=True):
+#     print("Loading dino model")
+#     dino = get_dino_from_repo(checkpoint, device)
+
+#     print("Compiling dino model")
+#     compiled_dino = torch.compile(dino.forward_features, backend="tensorrt")
+
+#     if warmup:
+#         print("Performing warmup pass...")
+#         dummy_input = torch.randn(warmup_batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
+#         with torch.no_grad():
+#             _ = compiled_dino(dummy_input)
+
+#     return compiled_dino
+
+def get_compiled_dino_from_repo(
+    checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", 
+    device: str = "cuda", 
+    max_side_len: int = 1024, 
+    warmup_batch_size: int = 64, 
+    warmup: bool = True,
+    backend: str = "tensorrt",
+    dynamic: bool = False
+):
+    print("Loading dino model")
+    dino = get_dino_from_repo(checkpoint, device)
+
+    print(f"Compiling dino model (backend: {backend}, dynamic: {dynamic})")
+    # 1. Pass the dynamic flag to torch.compile
+    compiled_dino = torch.compile(
+        dino.forward_features, 
+        backend=backend, 
+        dynamic=dynamic
+    )
+
+    if warmup:
+        print(f"Performing warmup pass with batch size {warmup_batch_size}...")
+        dummy_input = torch.randn(warmup_batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
+        
+        # 2. If dynamic is True, explicitly mark the batch dimension (dim 0) as dynamic
+        if dynamic:
+            dynamo.mark_dynamic(dummy_input, 0)
+
+        with torch.no_grad():
+            _ = compiled_dino(dummy_input)
+
+    return compiled_dino
+
+def get_dino_from_safetensors(checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda"):
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+
+    model_safetensors_path = hf_hub_download(repo_id=checkpoint, filename="model.safetensors")
+    state_dict = load_file(model_safetensors_path)
+
+    # Initialize the model
+    dinov3_vits16 = torch.hub.load(DINOV3_DIR, 'dinov3_vits16', source='local', pretrained=False)
+
+    # Load the state dictionary
+    dinov3_vits16.load_state_dict(state_dict)
+
+    return dinov3_vits16
