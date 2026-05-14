@@ -2,11 +2,44 @@ import torch
 import torch_tensorrt
 import torchvision.transforms.v2.functional as Fv2
 import torch.nn.functional as F
+from typing import Literal
 
 from jaxtyping import Float, Bool
 
+try:
+    from transformers import AutoModel
+except ImportError:
+    raise ImportError("Transformers not installed. Make sure you installed aidan-lib[hf]")
+
 TorchImage = Float[torch.Tensor, "3 H W"]
 TorchMask = Bool[torch.Tensor, "H W"]
+
+DINOv3Checkpoint = Literal[
+    "facebook/dinov3-vits16-pretrain-lvd1689m",
+    "facebook/dinov3-vits16plus-pretrain-lvd1689m",
+    "facebook/dinov3-vitb16-pretrain-lvd1689m",
+    "facebook/dinov3-vitl16-pretrain-lvd1689m",
+    "facebook/dinov3-vith16plus-pretrain-lvd1689m",
+    "facebook/dinov3-vit7b16-pretrain-lvd1689m",
+]
+
+DINOv3EmbeddingDimMap: dict[DINOv3Checkpoint, int] = {
+    "facebook/dinov3-vits16-pretrain-lvd1689m": 384,
+    "facebook/dinov3-vits16plus-pretrain-lvd1689m": 384,
+    "facebook/dinov3-vitb16-pretrain-lvd1689m": 768,
+    "facebook/dinov3-vitl16-pretrain-lvd1689m": 1024,
+    "facebook/dinov3-vith16plus-pretrain-lvd1689m": 1280,
+    "facebook/dinov3-vit7b16-pretrain-lvd1689m": 4096,
+}
+
+DINOv3PatchSizeMap: dict[DINOv3Checkpoint, int] = {
+    "facebook/dinov3-vits16-pretrain-lvd1689m": 16,
+    "facebook/dinov3-vits16plus-pretrain-lvd1689m": 16,
+    "facebook/dinov3-vitb16-pretrain-lvd1689m": 16,
+    "facebook/dinov3-vitl16-pretrain-lvd1689m": 16,
+    "facebook/dinov3-vith16plus-pretrain-lvd1689m": 16,
+    "facebook/dinov3-vit7b16-pretrain-lvd1689m": 16,
+}
 
 def preprocess_imgs(imgs: list[TorchImage], masks: list[TorchMask], max_side_len: int = 1024, patch_size: int = 16):
     batch_size = len(imgs)
@@ -92,3 +125,80 @@ def preprocess_imgs(imgs: list[TorchImage], masks: list[TorchMask], max_side_len
     
     return imgs_resized, masks_resized, overlaps_flat, px1, px2, py1, py2, valids
 
+def get_normal_dino(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda"):
+    print(f"Loading {checkpoint}...")
+    # Initialize the base model and set to eval
+    base_model = AutoModel.from_pretrained(checkpoint).to(device)
+    base_model.eval()
+    return base_model
+
+def get_compiled_dino(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", max_side_len=1024):
+    print(f"Loading {checkpoint}...")
+    # Initialize the base model and set to eval
+    base_model = AutoModel.from_pretrained(checkpoint).to(device)
+    base_model.eval() 
+    base_model.config.return_dict = False
+    
+    batch_size = 1
+    dummy_input = torch.randn(batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
+    # dummy_non_compiled_output = base_model(pixel_values=dummy_input)
+    # print(dummy_non_compiled_output[0].shape)
+
+    print("Compiling model with Torch-TensorRT backend...")
+    compiled_model = torch.compile(base_model, backend="tensorrt")
+
+    print("Performing warmup pass...")
+    with torch.no_grad():
+        _ = compiled_model(pixel_values=dummy_input, return_dict=False)
+        
+    print("Compilation and warmup complete.")
+    return compiled_model
+
+def get_onnx_dino(checkpoint: str = "onnx-community/dinov3-vits16-pretrain-lvd1689m-ONNX", device="cuda", max_side_len=1024, warmup_batch_size=64):
+    import onnxruntime as ort
+    from huggingface_hub import hf_hub_download
+    import torch
+
+    print(f"Loading ONNX model from {checkpoint}...")
+    
+    # Download the ONNX model file directly from the Hugging Face Hub
+    onnx_model_path = hf_hub_download(repo_id=checkpoint, filename="onnx/model.onnx")
+
+    # Keep it simple: Just use CUDA if requested, fallback to CPU
+    if str(device).startswith("cuda"):
+        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    else:
+        providers = ['CPUExecutionProvider']
+
+    print("Creating ONNX Runtime Inference Session...")
+    session = ort.InferenceSession(onnx_model_path, providers=providers)
+    
+    input_name = session.get_inputs()[0].name
+
+    class SimpleONNXWrapper:
+        def __init__(self, sess, in_name):
+            self.sess = sess
+            self.input_name = in_name
+            
+        def __call__(self, pixel_values: torch.Tensor, return_dict: bool = False):
+            # 1. Move PyTorch tensor to CPU and convert to NumPy
+            np_input = pixel_values.detach().cpu().numpy()
+            
+            # 2. Run standard ONNX execution
+            ort_outs = self.sess.run(None, {self.input_name: np_input})
+            
+            # 3. Convert NumPy outputs back to PyTorch tensors and move back to target device
+            out_tensors = tuple(torch.from_numpy(out).to(pixel_values.device) for out in ort_outs)
+            
+            return out_tensors
+
+    wrapped_model = SimpleONNXWrapper(session, input_name)
+
+    print("Performing warmup pass...")
+    dummy_input = torch.randn(warmup_batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
+    
+    with torch.no_grad():
+        _ = wrapped_model(pixel_values=dummy_input)
+    
+    print("ONNX loading and warmup complete.")
+    return wrapped_model

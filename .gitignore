@@ -1,4 +1,5 @@
 tests/data/
+trt_cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
