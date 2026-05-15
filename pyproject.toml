@@ -31,6 +31,10 @@ hf = [
     "accelerate>=1.13.0",
     "datasets>=2.19.1",
 ]
+compiled_dino = [
+    "torchmetrics>=1.0.3",
+    "termcolor>=3.3.0",
+]
 sam3 = [
     "aidan-lib[hf]",
     "kornia>=0.8.2",
@@ -69,6 +73,4 @@ url = "https://download.pytorch.org/whl/cu124"
 sam3 = { git = "https://github.com/Veldrovive/sam3.git" }
 
 [tool.uv.workspace]
-members = [
-    "src/aidan_lib/dinov3_repo",
-]
+members = []

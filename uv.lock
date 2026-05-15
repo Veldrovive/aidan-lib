@@ -47,22 +47,25 @@ name = "aidan-lib"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "bitsandbytes" },
     { name = "dotenv" },
     { name = "h5py" },
     { name = "jaxtyping" },
     { name = "numpy" },
-    { name = "onnxruntime-gpu" },
     { name = "pydantic" },
+    { name = "termcolor" },
 ]
 
 [package.optional-dependencies]
+compiled-dino = [
+    { name = "torchmetrics" },
+]
 dev = [
     { name = "ipykernel" },
 ]
 hf = [
     { name = "accelerate" },
     { name = "datasets" },
+    { name = "onnxruntime-gpu" },
     { name = "tensorrt" },
     { name = "torch", version = "2.5.1", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torch", version = "2.5.1+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version >= '3.13' or platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
@@ -77,6 +80,7 @@ sam3 = [
     { name = "datasets" },
     { name = "imageio", extra = ["pyav"] },
     { name = "kornia" },
+    { name = "onnxruntime-gpu" },
     { name = "tensorrt" },
     { name = "torch", version = "2.5.1", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torch", version = "2.5.1+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version >= '3.13' or platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
@@ -91,6 +95,7 @@ sam3-research = [
     { name = "kornia" },
     { name = "matplotlib" },
     { name = "ninja" },
+    { name = "onnxruntime-gpu" },
     { name = "opencv-python" },
     { name = "pycocotools" },
     { name = "sam3" },
@@ -110,12 +115,14 @@ science = [
     { name = "scipy" },
 ]
 torch = [
+    { name = "onnxruntime-gpu" },
     { name = "tensorrt" },
     { name = "torch", version = "2.5.1", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torch", version = "2.5.1+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version >= '3.13' or platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
     { name = "torch-tensorrt" },
 ]
 transnet = [
+    { name = "onnxruntime-gpu" },
     { name = "tensorrt" },
     { name = "torch", version = "2.5.1", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torch", version = "2.5.1+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version >= '3.13' or platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
@@ -130,7 +137,6 @@ requires-dist = [
     { name = "aidan-lib", extras = ["sam3", "science"], marker = "extra == 'sam3-research'" },
     { name = "aidan-lib", extras = ["torch"], marker = "extra == 'hf'" },
     { name = "aidan-lib", extras = ["torch"], marker = "extra == 'transnet'" },
-    { name = "bitsandbytes", specifier = ">=0.49.2" },
     { name = "datasets", marker = "extra == 'hf'", specifier = ">=2.19.1" },
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "einops", marker = "extra == 'sam3-research'", specifier = ">=0.8.2" },
@@ -143,7 +149,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'science'", specifier = ">=3.10.9" },
     { name = "ninja", marker = "extra == 'sam3-research'", specifier = ">=1.13.0" },
     { name = "numpy", specifier = ">=2.4.4" },
-    { name = "onnxruntime-gpu", specifier = ">=1.26.0" },
+    { name = "onnxruntime-gpu", marker = "extra == 'torch'", specifier = ">=1.26.0" },
     { name = "opencv-python", marker = "extra == 'sam3-research'", specifier = ">=4.13.0.92" },
     { name = "pycocotools", marker = "extra == 'sam3-research'", specifier = ">=2.0.11" },
     { name = "pydantic", specifier = ">=2.13.4" },
@@ -152,12 +158,14 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'science'", specifier = ">=1.8.0" },
     { name = "scipy", marker = "extra == 'science'", specifier = ">=1.17.1" },
     { name = "tensorrt", marker = "extra == 'torch'", specifier = "==10.3.0" },
+    { name = "termcolor", specifier = ">=3.3.0" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.5.1" },
     { name = "torch-tensorrt", marker = "extra == 'torch'", specifier = "==2.5.0" },
+    { name = "torchmetrics", marker = "extra == 'compiled-dino'", specifier = ">=1.0.3" },
     { name = "transformers", marker = "extra == 'hf'", specifier = ">=5.5.4" },
     { name = "transnetv2-pytorch", marker = "extra == 'transnet'", specifier = ">=1.0.5" },
 ]
-provides-extras = ["hydra", "torch", "hf", "sam3", "sam3-research", "transnet", "science", "dev"]
+provides-extras = ["hydra", "torch", "hf", "compiled-dino", "sam3", "sam3-research", "transnet", "science", "dev"]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -352,23 +360,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ae/b2/f4e83e41c1e3c186f34b7df506779d0cd7e40499e2e19519c7ece148cd20/av-17.0.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:3d3a36204cb1f1e7691e6446afa8d6b7097b09946dae732c71c5d05ce09e506e", size = 40582445, upload-time = "2026-04-18T17:12:26.285Z" },
     { url = "https://files.pythonhosted.org/packages/c8/59/8676188b72eed09d48ce6cfaf0f22b0bb9f3cfd74d388ee2b7fdf960536d/av-17.0.1-cp314-cp314t-win_amd64.whl", hash = "sha256:b87b98afe971cde123953073bc9c95ab0b7efd2ecc082dd2dbd11f9d9abf190e", size = 29217136, upload-time = "2026-04-18T17:12:29.189Z" },
     { url = "https://files.pythonhosted.org/packages/5f/af/0a6e1d2a845988039f6c197fa7269b5e9abbe17354fb41cc9d75bb260fcb/av-17.0.1-cp314-cp314t-win_arm64.whl", hash = "sha256:a87a42c36e29f75e7dff7281944f2a6876a2c8875e225ccbf6c1ae62748b4caa", size = 22072676, upload-time = "2026-04-18T17:12:31.836Z" },
-]
-
-[[package]]
-name = "bitsandbytes"
-version = "0.49.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "torch", version = "2.5.1", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
-    { name = "torch", version = "2.5.1+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version >= '3.13' or platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d8/7d/f1fe0992334b18cd8494f89aeec1dcc674635584fcd9f115784fea3a1d05/bitsandbytes-0.49.2-py3-none-macosx_14_0_arm64.whl", hash = "sha256:87be5975edeac5396d699ecbc39dfc47cf2c026daaf2d5852a94368611a6823f", size = 131940, upload-time = "2026-02-16T21:26:04.572Z" },
-    { url = "https://files.pythonhosted.org/packages/29/71/acff7af06c818664aa87ff73e17a52c7788ad746b72aea09d3cb8e424348/bitsandbytes-0.49.2-py3-none-manylinux_2_24_aarch64.whl", hash = "sha256:2fc0830c5f7169be36e60e11f2be067c8f812dfcb829801a8703735842450750", size = 31442815, upload-time = "2026-02-16T21:26:06.783Z" },
-    { url = "https://files.pythonhosted.org/packages/19/57/3443d6f183436fbdaf5000aac332c4d5ddb056665d459244a5608e98ae92/bitsandbytes-0.49.2-py3-none-manylinux_2_24_x86_64.whl", hash = "sha256:54b771f06e1a3c73af5c7f16ccf0fc23a846052813d4b008d10cb6e017dd1c8c", size = 60651714, upload-time = "2026-02-16T21:26:11.579Z" },
-    { url = "https://files.pythonhosted.org/packages/b6/d4/501655842ad6771fb077f576d78cbedb5445d15b1c3c91343ed58ca46f0e/bitsandbytes-0.49.2-py3-none-win_amd64.whl", hash = "sha256:2e0ddd09cd778155388023cbe81f00afbb7c000c214caef3ce83386e7144df7d", size = 55372289, upload-time = "2026-02-16T21:26:16.267Z" },
 ]
 
 [[package]]
@@ -1295,6 +1286,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/49/ac/21a1f8aa3777f5658576777ea76bfb124b702c520bbe90edf4ae9915eafa/lazy_loader-0.5.tar.gz", hash = "sha256:717f9179a0dbed357012ddad50a5ad3d5e4d9a0b8712680d4e687f5e6e6ed9b3", size = 15294, upload-time = "2026-03-06T15:45:09.054Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8a/a1/8d812e53a5da1687abb10445275d41a8b13adb781bbf7196ddbcf8d88505/lazy_loader-0.5-py3-none-any.whl", hash = "sha256:ab0ea149e9c554d4ffeeb21105ac60bed7f3b4fd69b1d2360a4add51b170b005", size = 8044, upload-time = "2026-03-06T15:45:07.668Z" },
+]
+
+[[package]]
+name = "lightning-utilities"
+version = "0.11.8"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+dependencies = [
+    { name = "packaging" },
+    { name = "setuptools" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/lightning_utilities-0.11.8-py3-none-any.whl", hash = "sha256:a57edb34a44258f0c61eed8b8b88926766e9052f5e60bbe69e4871a2b2bfd970", upload-time = "2024-10-29T23:48:01Z" },
 ]
 
 [[package]]
@@ -2902,6 +2906,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/80/10/91ccf3ba8edaf4d5f05dbe36aa533033714e0011422d57035a5491ba69c4/tensorrt_cu12_libs-10.3.0.tar.gz", hash = "sha256:d2f36838e2762b5ceb62f614157ba4764de2fa1f4fe5661c6cfc07e07e6e71da", size = 630, upload-time = "2024-08-07T01:45:55.446Z" }
 
 [[package]]
+name = "termcolor"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/79/cf31d7a93a8fdc6aa0fbb665be84426a8c5a557d9240b6239e9e11e35fc5/termcolor-3.3.0.tar.gz", hash = "sha256:348871ca648ec6a9a983a13ab626c0acce02f515b9e1983332b17af7979521c5", size = 14434, upload-time = "2025-12-29T12:55:21.882Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/d1/8bb87d21e9aeb323cc03034f5eaf2c8f69841e40e4853c2627edf8111ed3/termcolor-3.3.0-py3-none-any.whl", hash = "sha256:cf642efadaf0a8ebbbf4bc7a31cec2f9b5f21a9f726f4ccbb08192c9c26f43a5", size = 7734, upload-time = "2025-12-29T12:55:20.718Z" },
+]
+
+[[package]]
 name = "threadpoolctl"
 version = "3.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3055,6 +3068,21 @@ dependencies = [
 wheels = [
     { url = "https://download.pytorch.org/whl/cu124/torch_tensorrt-2.5.0%2Bcu124-cp312-cp312-linux_x86_64.whl", hash = "sha256:497d068a6eaeb2bc3444b6fce73b80764084b5b95a11f614c196df7b65f38c4b", upload-time = "2024-10-29T23:47:05Z" },
     { url = "https://download.pytorch.org/whl/cu124/torch_tensorrt-2.5.0%2Bcu124-cp312-cp312-win_amd64.whl", hash = "sha256:d64150560b88f6e4f9859c8dd516e24725611e334a94fbfe44ba5f91401fe8ca", upload-time = "2024-10-29T23:47:05Z" },
+]
+
+[[package]]
+name = "torchmetrics"
+version = "1.0.3"
+source = { registry = "https://download.pytorch.org/whl/cu124" }
+dependencies = [
+    { name = "lightning-utilities" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "torch", version = "2.5.1", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version < '3.13' and platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.5.1+cu124", source = { registry = "https://download.pytorch.org/whl/cu124" }, marker = "python_full_version >= '3.13' or platform_machine != 'aarch64' or platform_python_implementation != 'CPython' or sys_platform != 'linux'" },
+]
+wheels = [
+    { url = "https://download.pytorch.org/whl/torchmetrics-1.0.3-py3-none-any.whl", hash = "sha256:612a74ab8ebfcd4ebb38e5c370ce29a0e73af074948048f6f2233e25cf60da75", upload-time = "2023-10-06T21:43:29Z" },
 ]
 
 [[package]]
