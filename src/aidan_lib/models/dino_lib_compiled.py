@@ -2,7 +2,7 @@ import torch
 import torch_tensorrt
 import torchvision.transforms.v2.functional as Fv2
 import torch.nn.functional as F
-from typing import Literal
+from typing import Literal, Callable
 import torch._dynamo as dynamo
 
 from jaxtyping import Float, Bool
@@ -12,7 +12,11 @@ try:
 except ImportError:
     raise ImportError("Transformers not installed. Make sure you installed aidan-lib[hf]")
 
+import math
+import numpy as np
+
 from aidan_lib.definitions import DINOV3_DIR, DINOV3_VITS16_URL, DINOV3_VITS16_PLUS_URL, DINOV3_VITB16_URL, DINOV3_VITL16_URL, DINOV3_VITH16PLUS_URL, DINOV3_VIT7B16_URL
+from aidan_lib.models.dino_lib import DINOv3Segmentation
 
 TorchImage = Float[torch.Tensor, "3 H W"]
 TorchMask = Bool[torch.Tensor, "H W"]
@@ -35,6 +39,15 @@ DINOv3URLMap: dict[DINOv3Checkpoint, str | None] = {
     "facebook/dinov3-vit7b16-pretrain-lvd1689m": DINOV3_VIT7B16_URL,
 }
 
+DINOv3ModelNameMap: dict[DINOv3Checkpoint, str] = {
+    "facebook/dinov3-vits16-pretrain-lvd1689m": "dinov3_vits16",
+    "facebook/dinov3-vits16plus-pretrain-lvd1689m": "dinov3_vits16plus",
+    "facebook/dinov3-vitb16-pretrain-lvd1689m": "dinov3_vitb16",
+    "facebook/dinov3-vitl16-pretrain-lvd1689m": "dinov3_vitl16",
+    "facebook/dinov3-vith16plus-pretrain-lvd1689m": "dinov3_vith16plus",
+    "facebook/dinov3-vit7b16-pretrain-lvd1689m": "dinov3_vit7b16",
+}
+
 DINOv3EmbeddingDimMap: dict[DINOv3Checkpoint, int] = {
     "facebook/dinov3-vits16-pretrain-lvd1689m": 384,
     "facebook/dinov3-vits16plus-pretrain-lvd1689m": 384,
@@ -53,7 +66,9 @@ DINOv3PatchSizeMap: dict[DINOv3Checkpoint, int] = {
     "facebook/dinov3-vit7b16-pretrain-lvd1689m": 16,
 }
 
-def preprocess_imgs(imgs: list[TorchImage], masks: list[TorchMask], max_side_len: int = 1024, patch_size: int = 16):
+CompileBackend = Literal["inductor", "tensorrt", "cudagraphs", "aotautograd", "nvcc"]
+
+def preprocess_imgs_w_masks(imgs: list[TorchImage], masks: list[TorchMask], max_side_len: int = 1024, patch_size: int = 16, normalize: bool = True):
     batch_size = len(imgs)
     total_image_patch_w = total_image_patch_h = max_side_len // patch_size
     device = imgs[0].device
@@ -68,6 +83,11 @@ def preprocess_imgs(imgs: list[TorchImage], masks: list[TorchMask], max_side_len
     valids = torch.full((batch_size, total_image_patch_h, total_image_patch_w), False, dtype=torch.bool, device=device)
 
     for idx, (img, mask) in enumerate(zip(imgs, masks)):
+        # Check and ensure proper type and range
+        assert img.min() >= 0.0
+        assert img.max() <= 1.0
+        assert mask.dtype == torch.bool
+
         # Cast to float for interpolation down the line
         mask = mask.float().unsqueeze(0) 
 
@@ -134,118 +154,83 @@ def preprocess_imgs(imgs: list[TorchImage], masks: list[TorchMask], max_side_len
     assert px2.shape[1] == total_image_patch_h * total_image_patch_w
     assert py1.shape[1] == total_image_patch_h * total_image_patch_w
     assert py2.shape[1] == total_image_patch_h * total_image_patch_w
+
+    if normalize:
+        imgs_resized = Fv2.normalize(imgs_resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     
     return imgs_resized, masks_resized, overlaps_flat, px1, px2, py1, py2, valids
 
-def get_normal_dino(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda"):
-    print(f"Loading {checkpoint}...")
-    # Initialize the base model and set to eval
-    base_model = AutoModel.from_pretrained(checkpoint).to(device)
-    base_model.eval()
-    return base_model
+def preprocess_imgs(imgs: list[TorchImage], max_side_len: int = 1024, patch_size: int = 16, normalize: bool = True):
+    batch_size = len(imgs)
+    total_image_patch_w = total_image_patch_h = max_side_len // patch_size
+    device = imgs[0].device
 
-def get_compiled_dino(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", max_side_len=1024):
-    print(f"Loading {checkpoint}...")
-    # Initialize the base model and set to eval
-    base_model = AutoModel.from_pretrained(checkpoint).to(device)
-    base_model.eval() 
-    base_model.config.return_dict = False
-    
-    batch_size = 1
-    dummy_input = torch.randn(batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
-    # dummy_non_compiled_output = base_model(pixel_values=dummy_input)
-    # print(dummy_non_compiled_output[0].shape)
+    imgs_resized = torch.empty((batch_size, 3, max_side_len, max_side_len), dtype=torch.float32, device=device)
 
-    print("Compiling model with Torch-TensorRT backend...")
-    # TODO: Dig through the hf code to extract the actual model skipping the stuff on the ends that breaks the compile
-    compiled_model = torch.compile(base_model, backend="tensorrt")
+    grid_sizes = torch.empty((batch_size, 2), dtype=torch.long, device=device)
+    original_sizes = torch.empty((batch_size, 2), dtype=torch.long, device=device)
+    scales = torch.empty((batch_size, 2), dtype=torch.float32, device=device)  # (x scale, y scale)
 
-    print("Performing warmup pass...")
-    with torch.no_grad():
-        _ = compiled_model(pixel_values=dummy_input, return_dict=False)
+    valids = torch.full((batch_size, total_image_patch_h, total_image_patch_w), False, dtype=torch.bool, device=device)
+    for idx, img in enumerate(imgs):
+        # Check and ensure proper type and range
+        assert img.min() >= 0.0
+        assert img.max() <= 1.0
+
+        orig_h, orig_w = img.shape[1], img.shape[2]
+        scale = max_side_len / max(orig_w, orig_h)
+        new_w, new_h = orig_w * scale, orig_h * scale
+
+        resize_w = round(new_w / patch_size) * patch_size
+        resize_h = round(new_h / patch_size) * patch_size
+
+        scale_w = resize_w / orig_w
+        scale_h = resize_h / orig_h
+
+        # Size argument is [H, W]
+        img_resized = Fv2.resize(img, size=[resize_h, resize_w], interpolation=Fv2.InterpolationMode.BICUBIC, antialias=True)
+
+        pad_w = max_side_len - resize_w
+        pad_h = max_side_len - resize_h
         
-    print("Compilation and warmup complete.")
-    return compiled_model
+        # Padding sequence is [left, top, right, bottom]
+        img_padded = Fv2.pad(img_resized, padding=[0, 0, pad_w, pad_h], padding_mode="constant", fill=0.0)
 
-def get_onnx_dino(checkpoint: str = "onnx-community/dinov3-vits16-pretrain-lvd1689m-ONNX", device="cuda", max_side_len=1024, warmup_batch_size=64):
-    import onnxruntime as ort
-    from huggingface_hub import hf_hub_download
-    import torch
+        imgs_resized[idx] = img_padded
+        grid_sizes[idx] = torch.tensor([resize_h // patch_size, resize_w // patch_size], device=device)
+        original_sizes[idx] = torch.tensor([orig_w, orig_h], device=device)
+        scales[idx] = torch.tensor([scale_w, scale_h], device=device)
+        valids[idx, :resize_h // patch_size, :resize_w // patch_size] = True
 
-    print(f"Loading ONNX model from {checkpoint}...")
+    if normalize:
+        imgs_resized = Fv2.normalize(imgs_resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+    return imgs_resized, grid_sizes, original_sizes, scales, valids
+
+def get_dino_from_repo(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", dtype: torch.dtype = torch.bfloat16):
+    model_url = DINOv3URLMap[checkpoint]
+    if model_url is None:
+        raise ValueError(f"Checkpoint {checkpoint} not found in DINOv3URLMap")
+    model_name = DINOv3ModelNameMap[checkpoint]
+    if model_name is None:
+        raise ValueError(f"Model {checkpoint} not found in DINOv3ModelNameMap")
     
-    # Download the ONNX model file directly from the Hugging Face Hub
-    onnx_model_path = hf_hub_download(repo_id=checkpoint, filename="onnx/model.onnx")
-
-    # Keep it simple: Just use CUDA if requested, fallback to CPU
-    if str(device).startswith("cuda"):
-        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-    else:
-        providers = ['CPUExecutionProvider']
-
-    print("Creating ONNX Runtime Inference Session...")
-    session = ort.InferenceSession(onnx_model_path, providers=providers)
-    
-    input_name = session.get_inputs()[0].name
-
-    class SimpleONNXWrapper:
-        def __init__(self, sess, in_name):
-            self.sess = sess
-            self.input_name = in_name
-            
-        def __call__(self, pixel_values: torch.Tensor, return_dict: bool = False):
-            # 1. Move PyTorch tensor to CPU and convert to NumPy
-            np_input = pixel_values.detach().cpu().numpy()
-            
-            # 2. Run standard ONNX execution
-            ort_outs = self.sess.run(None, {self.input_name: np_input})
-            
-            # 3. Convert NumPy outputs back to PyTorch tensors and move back to target device
-            out_tensors = tuple(torch.from_numpy(out).to(pixel_values.device) for out in ort_outs)
-            
-            return out_tensors
-
-    wrapped_model = SimpleONNXWrapper(session, input_name)
-
-    print("Performing warmup pass...")
-    dummy_input = torch.randn(warmup_batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
-    
-    with torch.no_grad():
-        _ = wrapped_model(pixel_values=dummy_input)
-    
-    print("ONNX loading and warmup complete.")
-    return wrapped_model
-
-def get_dino_from_repo(checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda"):
-    dinov3_vits16 = torch.hub.load(DINOV3_DIR, 'dinov3_vits16', source='local', weights="https://dinov3.llamameta.net/dinov3_vits16/dinov3_vits16_pretrain_lvd1689m-08c60483.pth?Policy=eyJTdGF0ZW1lbnQiOlt7InVuaXF1ZV9oYXNoIjoiYm12Y2VweXAwdzNwcWlrM3dzeTJ3NGhlIiwiUmVzb3VyY2UiOiJodHRwczpcL1wvZGlub3YzLmxsYW1hbWV0YS5uZXRcLyoiLCJDb25kaXRpb24iOnsiRGF0ZUxlc3NUaGFuIjp7IkFXUzpFcG9jaFRpbWUiOjE3Nzg5NTAxNjJ9fX1dfQ__&Signature=XE-9Hdtv3bD6-ozPm9kDYeovRuaNnnzgYRzgCGErXz0hYpQ3FH-b82Wj4ZCqsEuSneMfeMeJgeGAev3DFcATZx0Fy6LbnC9ZKADxmrUOr7A5TgGCpFwdJEA%7Eo5KlRLYNVQNvuUj0oMUc4KxyDKnrdZybBRn-8hIfQOZSn1BnXVKn5Af-XinmWc6fuXUtRMh8bnSi%7EAvmZd6mer1ReDSZW2iqdvUZyQ7foi4MRhSWRiA02pZlaCzAd9HeNlSuHSmxr5Nhaq60zyt-yqOU7k8TH-BaXT39a5JuJKR51lkiM1X8avFQBIOWAuX73DVlwVq%7EjpZIj9-dlvo1HZ%7E7WGpIdg__&Key-Pair-Id=K15QRJLYKIFSLZ&Download-Request-ID=982572787689703").to(device).eval()
-    return dinov3_vits16
-
-# def get_compiled_dino_from_repo(checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", max_side_len=1024, warmup_batch_size=64, warmup=True):
-#     print("Loading dino model")
-#     dino = get_dino_from_repo(checkpoint, device)
-
-#     print("Compiling dino model")
-#     compiled_dino = torch.compile(dino.forward_features, backend="tensorrt")
-
-#     if warmup:
-#         print("Performing warmup pass...")
-#         dummy_input = torch.randn(warmup_batch_size, 3, max_side_len, max_side_len, dtype=torch.float32, device=device)
-#         with torch.no_grad():
-#             _ = compiled_dino(dummy_input)
-
-#     return compiled_dino
+    dino = torch.hub.load(DINOV3_DIR, model_name, source='local', weights=model_url)
+    dino = dino.to(device, dtype=dtype).eval()  # pyrefly: ignore
+    return dino
 
 def get_compiled_dino_from_repo(
-    checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", 
+    checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", 
     device: str = "cuda", 
+    dtype: torch.dtype = torch.bfloat16,
     max_side_len: int = 1024, 
     warmup_batch_size: int = 64, 
     warmup: bool = True,
-    backend: str = "tensorrt",
+    backend: CompileBackend = "inductor",
     dynamic: bool = False
-):
+) -> Callable:
     print("Loading dino model")
-    dino = get_dino_from_repo(checkpoint, device)
+    dino = get_dino_from_repo(checkpoint, device, dtype=dtype)
 
     print(f"Compiling dino model (backend: {backend}, dynamic: {dynamic})")
     # 1. Pass the dynamic flag to torch.compile
@@ -264,21 +249,146 @@ def get_compiled_dino_from_repo(
             dynamo.mark_dynamic(dummy_input, 0)
 
         with torch.no_grad():
-            _ = compiled_dino(dummy_input)
+            with torch.autocast(device_type=torch.device(device).type, dtype=dtype):
+                _ = compiled_dino(dummy_input)
 
     return compiled_dino
 
-def get_dino_from_safetensors(checkpoint: str = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda"):
-    from huggingface_hub import hf_hub_download
-    from safetensors.torch import load_file
+class DINOv3CompiledHarness:
+    max_side_len: int
+    checkpoint: DINOv3Checkpoint
+    embedding_dim: int
+    patch_size: int
+    model: Callable
+    device: torch.device
 
-    model_safetensors_path = hf_hub_download(repo_id=checkpoint, filename="model.safetensors")
-    state_dict = load_file(model_safetensors_path)
+    def __init__(
+        self,
+        checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m",
+        device: str = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        max_side_len: int = 1024,
+        warmup_batch_size: int = 64,
+        warmup: bool = True,
+        backend: CompileBackend = "inductor",
+        dynamic: bool = False
+    ):
+        self.device = torch.device(device)
+        self.dtype = dtype
+        self.max_side_len = max_side_len
+        self.checkpoint = checkpoint
+        self.embedding_dim = DINOv3EmbeddingDimMap[checkpoint]
+        self.patch_size = DINOv3PatchSizeMap[checkpoint]
 
-    # Initialize the model
-    dinov3_vits16 = torch.hub.load(DINOV3_DIR, 'dinov3_vits16', source='local', pretrained=False)
+        assert (self.max_side_len / self.patch_size).is_integer(), "max_side_len must be multiple of patch_size"
 
-    # Load the state dictionary
-    dinov3_vits16.load_state_dict(state_dict)
+        # Load the compiled model
+        self.model = get_compiled_dino_from_repo(
+            checkpoint=checkpoint,
+            device=device,
+            dtype=dtype,
+            max_side_len=max_side_len,
+            warmup_batch_size=warmup_batch_size,
+            warmup=warmup,
+            backend=backend,
+            dynamic=dynamic
+        )
 
-    return dinov3_vits16
+        # Standard ImageNet normalization used by DINO
+        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1).to(self.device)
+        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
+
+    def extract_patch_features(self, imgs: list[torch.Tensor]) -> tuple[list[torch.Tensor], torch.Tensor, list[tuple[int, int]], list[tuple[int, int]]]:
+        imgs_resized, grid_sizes, original_sizes, scales, valids = preprocess_imgs(imgs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True)
+
+        with torch.no_grad():
+            with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                outputs = self.model(imgs_resized)
+            cls_tokens = outputs["x_norm_clstoken"]
+            patch_tokens = outputs["x_norm_patchtokens"]
+
+        grid_dim = self.max_side_len // self.patch_size
+        b, n_patches, dim = patch_tokens.shape
+
+        if n_patches != grid_dim * grid_dim:
+            grid_dim = int(math.sqrt(n_patches))
+
+        full_grid_embeddings = patch_tokens.reshape(b, grid_dim, grid_dim, dim)
+        
+        features_list = []
+        grid_sizes_list = []
+        original_sizes_list = []
+        
+        for i in range(b):
+            valid_h, valid_w = int(grid_sizes[i, 0].item()), int(grid_sizes[i, 1].item())
+            features_list.append(full_grid_embeddings[i, :valid_h, :valid_w, :].clone())
+            grid_sizes_list.append((valid_h, valid_w))
+            original_sizes_list.append((int(original_sizes[i, 0].item()), int(original_sizes[i, 1].item())))
+        
+        return features_list, cls_tokens, grid_sizes_list, original_sizes_list
+
+    def match_bool_segmentations_to_dino(
+        self, 
+        images: list[torch.Tensor],  
+        segs: list[torch.Tensor | np.ndarray]
+    ) -> list[list[DINOv3Segmentation]]:
+        # Ensure segs are all boolean tensors on the right device
+        processed_segs = []
+        for seg in segs:
+            if isinstance(seg, np.ndarray):
+                seg = torch.from_numpy(seg)
+            seg = seg.to(self.device).bool()
+            processed_segs.append(seg)
+            
+        imgs_resized, masks_resized, overlaps_flat, px1, px2, py1, py2, valids = preprocess_imgs_w_masks(
+            images, processed_segs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True
+        )
+
+        with torch.no_grad():
+            with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                outputs = self.model(imgs_resized)
+            patch_tokens = outputs["x_norm_patchtokens"]
+        
+        dino_segmentations = []
+        b = len(images)
+        valids_flat = valids.view(b, -1)
+
+        for img_idx in range(b):
+            valid_indices = torch.where((overlaps_flat[img_idx] > 0.0) & valids_flat[img_idx])[0]
+
+            if len(valid_indices) == 0:
+                dino_segmentations.append([])
+                continue
+            
+            img_px1 = torch.round(px1[img_idx, valid_indices]).int()
+            img_py1 = torch.round(py1[img_idx, valid_indices]).int()
+            img_px2 = torch.round(px2[img_idx, valid_indices]).int()
+            img_py2 = torch.round(py2[img_idx, valid_indices]).int()
+
+            dino_bboxes = torch.stack([img_px1, img_py1, img_px2, img_py2], dim=1)
+            dino_overlaps = overlaps_flat[img_idx, valid_indices]
+            dino_embeddings = patch_tokens[img_idx, valid_indices]
+
+            dino_segmentations.append([
+                DINOv3Segmentation(1, dino_embeddings, dino_overlaps, dino_bboxes)
+            ])
+
+        return dino_segmentations
+
+    def embed_pooled(self, imgs: list[torch.Tensor] | torch.Tensor) -> torch.Tensor:
+        if isinstance(imgs, torch.Tensor):
+            batched_images = imgs.to(self.device)
+            if batched_images.dim() == 3:
+                batched_images = batched_images.unsqueeze(0)
+            if batched_images.dtype not in (torch.float32, torch.float16, torch.bfloat16):
+                batched_images = batched_images.float() / 255.0
+            batched_images = (batched_images - self.mean) / self.std
+        else:
+            batched_images, _, _, _, _ = preprocess_imgs(imgs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True)
+
+        with torch.no_grad():
+            with torch.autocast(device_type=self.device.type, dtype=self.dtype):
+                outputs = self.model(batched_images)
+            cls_tokens = outputs["x_norm_clstoken"]
+            
+        return cls_tokens
