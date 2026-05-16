@@ -21,7 +21,7 @@ hydra = [
 ]
 torch = [
     "torch>=2.5.1",
-    "onnxruntime-gpu>=1.26.0"
+    "torchvision>=0.20.1",
 ]
 hf = [
     "aidan-lib[torch]",
