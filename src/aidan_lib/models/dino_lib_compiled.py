@@ -1,5 +1,4 @@
 import torch
-import torch_tensorrt
 import torchvision.transforms.v2.functional as Fv2
 import torch.nn.functional as F
 from typing import Literal, Callable
