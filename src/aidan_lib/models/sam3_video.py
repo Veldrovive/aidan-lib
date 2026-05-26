@@ -28,7 +28,7 @@ try:
 except ImportError:
     raise ImportError("Meta SAM3 not installed. Make sure you installed it via 'pip install git+https://github.com/facebookresearch/sam3.git'")
 
-SEG_ID_TYPE = np.int8
+SEG_ID_TYPE = np.int16
 MAX_SEG_ID = np.iinfo(SEG_ID_TYPE).max
 BACKGROUND_SEG_ID = MAX_SEG_ID
 
