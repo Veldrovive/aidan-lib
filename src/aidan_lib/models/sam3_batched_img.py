@@ -20,7 +20,7 @@ class SAM3ImageResult:
     masks: Bool[torch.Tensor, "num_segments H W"]
 
 class SAM3BatchedImageHarness:
-    def __init__(self, device: str | torch.device = "cuda", dtype: torch.dtype = torch.bfloat16, model_compile=False):
+    def __init__(self, device: str | torch.device = "cuda", dtype: torch.dtype = torch.bfloat16, model_compile=False, score_threshold: float = 0.5):
         print(f"Building SAM3 image model with {dtype} precision")
         self.model = build_sam3_image_model(bpe_path=None, compile=model_compile)
         print(f"Built model, now moving to device {device} with {dtype} precision")
@@ -36,7 +36,7 @@ class SAM3BatchedImageHarness:
             use_original_sizes_box=True,   # our boxes should be resized to the image size
             use_original_sizes_mask=True,   # our masks should be resized to the image size
             convert_mask_to_rle=False, # the postprocessor supports efficient conversion to RLE format. In this demo we prefer the binary format for easy plotting
-            detection_threshold=0.5,   # Only return confident detections
+            detection_threshold=score_threshold,   # Only return confident detections
             to_cpu=False,
         )
 

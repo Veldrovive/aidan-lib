@@ -110,6 +110,7 @@ class SAM3Harness(BaseSAM3Harness):
         max_num_objects: int = 16,
         compile: bool = False,
         warm_up: bool = False,
+        score_threshold: float = 0.5,
     ):
         self.device = torch.device(device)
         self.dtype = dtype
@@ -120,7 +121,7 @@ class SAM3Harness(BaseSAM3Harness):
         # Initialize Meta's multiplex video predictor
         print(f"Constructing multiplex predictor")
         print(f"WARNING: DISABLING FA3")
-        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=False, compile=compile, warm_up=warm_up, max_num_objects=max_num_objects)
+        self.predictor = build_sam3_multiplex_video_predictor(use_fa3=False, compile=compile, warm_up=warm_up, max_num_objects=max_num_objects, default_output_prob_thresh=score_threshold)
         print(f"Created multiplex predictor")
 
         self.main_session_id: str | None = None
