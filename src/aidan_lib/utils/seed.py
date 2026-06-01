@@ -22,3 +22,5 @@ def set_seed(seed: int) -> None:
         np.random.seed(seed)
     if torch is not None:
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
