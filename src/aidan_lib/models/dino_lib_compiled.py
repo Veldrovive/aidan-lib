@@ -16,9 +16,7 @@ import numpy as np
 
 from aidan_lib.definitions import DINOV3_DIR, DINOV3_VITS16_URL, DINOV3_VITS16_PLUS_URL, DINOV3_VITB16_URL, DINOV3_VITL16_URL, DINOV3_VITH16PLUS_URL, DINOV3_VIT7B16_URL
 from aidan_lib.models.dino_lib import DINOv3Segmentation
-
-TorchImage = Float[torch.Tensor, "3 H W"]
-TorchMask = Bool[torch.Tensor, "H W"]
+from aidan_lib.utils.image import resize_and_pad_images, TorchImage, TorchMask
 
 DINOv3Checkpoint = Literal[
     "facebook/dinov3-vits16-pretrain-lvd1689m",
@@ -66,145 +64,6 @@ DINOv3PatchSizeMap: dict[DINOv3Checkpoint, int] = {
 }
 
 CompileBackend = Literal["inductor", "tensorrt", "cudagraphs", "aotautograd", "nvcc"]
-
-def preprocess_imgs_w_masks(imgs: list[TorchImage], masks: list[TorchMask], max_side_len: int = 1024, patch_size: int = 16, normalize: bool = True):
-    batch_size = len(imgs)
-    total_image_patch_w = total_image_patch_h = max_side_len // patch_size
-    device = imgs[0].device
-
-    imgs_resized = torch.empty((batch_size, 3, max_side_len, max_side_len), dtype=torch.float32, device=device)
-    masks_resized = torch.empty((batch_size, 1, max_side_len, max_side_len), dtype=torch.float32, device=device)
-
-    grid_sizes = torch.empty((batch_size, 2), dtype=torch.long, device=device)
-    original_sizes = torch.empty((batch_size, 2), dtype=torch.long, device=device)
-    scales = torch.empty((batch_size, 2), dtype=torch.float32, device=device)  # (x scale, y scale)
-
-    valids = torch.full((batch_size, total_image_patch_h, total_image_patch_w), False, dtype=torch.bool, device=device)
-
-    for idx, (img, mask) in enumerate(zip(imgs, masks)):
-        # Check and ensure proper type and range
-        assert img.min() >= 0.0
-        assert img.max() <= 1.0
-        assert mask.dtype == torch.bool
-
-        # Cast to float for interpolation down the line
-        mask = mask.float().unsqueeze(0) 
-
-        orig_h, orig_w = img.shape[1], img.shape[2]
-        scale = max_side_len / max(orig_w, orig_h)
-        new_w, new_h = orig_w * scale, orig_h * scale
-
-        resize_w = round(new_w / patch_size) * patch_size
-        resize_h = round(new_h / patch_size) * patch_size
-
-        scale_w = resize_w / orig_w
-        scale_h = resize_h / orig_h
-
-        # Size argument is [H, W]
-        img_resized = Fv2.resize(img, size=[resize_h, resize_w], interpolation=Fv2.InterpolationMode.BICUBIC, antialias=True)
-        mask_resized = Fv2.resize(mask, size=[resize_h, resize_w], interpolation=Fv2.InterpolationMode.NEAREST, antialias=False)
-
-        pad_w = max_side_len - resize_w
-        pad_h = max_side_len - resize_h
-        
-        # Padding sequence is [left, top, right, bottom]
-        img_padded = Fv2.pad(img_resized, padding=[0, 0, pad_w, pad_h], padding_mode="constant", fill=0.0)
-        mask_padded = Fv2.pad(mask_resized, padding=[0, 0, pad_w, pad_h], padding_mode="constant", fill=0.0)
-
-        imgs_resized[idx] = img_padded
-        masks_resized[idx] = mask_padded
-        grid_sizes[idx] = torch.tensor([resize_h // patch_size, resize_w // patch_size], device=device)
-        original_sizes[idx] = torch.tensor([orig_w, orig_h], device=device)
-        scales[idx] = torch.tensor([scale_w, scale_h], device=device)
-        valids[idx, :resize_h // patch_size, :resize_w // patch_size] = True
-
-    # First, get the mask overlap with the patches
-    overlaps = F.interpolate(
-        masks_resized,
-        size=(total_image_patch_h, total_image_patch_w),
-        mode='area'
-    )
-
-    overlaps_flat = overlaps.view(batch_size, -1)
-    assert overlaps_flat.shape[1] == total_image_patch_h * total_image_patch_w
-
-    # Create 1D coordinate arrays
-    y_coords = torch.arange(0, max_side_len, patch_size, dtype=torch.float32, device=device)
-    x_coords = torch.arange(0, max_side_len, patch_size, dtype=torch.float32, device=device)
-    
-    # Generate a 2D grid of coordinates
-    grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
-    
-    # Flatten the 2D grid into row-major order (matches overlaps_flat)
-    py1_unscaled = grid_y.reshape(-1)
-    px1_unscaled = grid_x.reshape(-1)
-    
-    py2_unscaled = py1_unscaled + patch_size
-    px2_unscaled = px1_unscaled + patch_size
-
-    # We scale by the scaling factors to get the original image coordinates.
-    # unsqueeze(0) makes the arrays (1, num_patches) so they broadcast with scales (batch, 1) -> (batch, num_patches)
-    px1 = px1_unscaled.unsqueeze(0) / scales[:, 0:1]
-    px2 = px2_unscaled.unsqueeze(0) / scales[:, 0:1]
-    py1 = py1_unscaled.unsqueeze(0) / scales[:, 1:2]
-    py2 = py2_unscaled.unsqueeze(0) / scales[:, 1:2]
-
-    assert px1.shape[1] == total_image_patch_h * total_image_patch_w
-    assert px2.shape[1] == total_image_patch_h * total_image_patch_w
-    assert py1.shape[1] == total_image_patch_h * total_image_patch_w
-    assert py2.shape[1] == total_image_patch_h * total_image_patch_w
-
-    if normalize:
-        imgs_resized = Fv2.normalize(imgs_resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    
-    return imgs_resized, masks_resized, overlaps_flat, px1, px2, py1, py2, valids
-
-def preprocess_imgs(imgs: list[TorchImage], max_side_len: int = 1024, patch_size: int = 16, normalize: bool = True):
-    batch_size = len(imgs)
-    total_image_patch_w = total_image_patch_h = max_side_len // patch_size
-    device = imgs[0].device
-
-    imgs_resized = torch.empty((batch_size, 3, max_side_len, max_side_len), dtype=torch.float32, device=device)
-
-    grid_sizes = torch.empty((batch_size, 2), dtype=torch.long, device=device)
-    original_sizes = torch.empty((batch_size, 2), dtype=torch.long, device=device)
-    scales = torch.empty((batch_size, 2), dtype=torch.float32, device=device)  # (x scale, y scale)
-
-    valids = torch.full((batch_size, total_image_patch_h, total_image_patch_w), False, dtype=torch.bool, device=device)
-    for idx, img in enumerate(imgs):
-        # Check and ensure proper type and range
-        assert img.min() >= 0.0
-        assert img.max() <= 1.0
-
-        orig_h, orig_w = img.shape[1], img.shape[2]
-        scale = max_side_len / max(orig_w, orig_h)
-        new_w, new_h = orig_w * scale, orig_h * scale
-
-        resize_w = round(new_w / patch_size) * patch_size
-        resize_h = round(new_h / patch_size) * patch_size
-
-        scale_w = resize_w / orig_w
-        scale_h = resize_h / orig_h
-
-        # Size argument is [H, W]
-        img_resized = Fv2.resize(img, size=[resize_h, resize_w], interpolation=Fv2.InterpolationMode.BICUBIC, antialias=True)
-
-        pad_w = max_side_len - resize_w
-        pad_h = max_side_len - resize_h
-        
-        # Padding sequence is [left, top, right, bottom]
-        img_padded = Fv2.pad(img_resized, padding=[0, 0, pad_w, pad_h], padding_mode="constant", fill=0.0)
-
-        imgs_resized[idx] = img_padded
-        grid_sizes[idx] = torch.tensor([resize_h // patch_size, resize_w // patch_size], device=device)
-        original_sizes[idx] = torch.tensor([orig_w, orig_h], device=device)
-        scales[idx] = torch.tensor([scale_w, scale_h], device=device)
-        valids[idx, :resize_h // patch_size, :resize_w // patch_size] = True
-
-    if normalize:
-        imgs_resized = Fv2.normalize(imgs_resized, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-    return imgs_resized, grid_sizes, original_sizes, scales, valids
 
 def get_dino_from_repo(checkpoint: DINOv3Checkpoint = "facebook/dinov3-vits16-pretrain-lvd1689m", device="cuda", dtype: torch.dtype = torch.bfloat16):
     model_url = DINOv3URLMap[checkpoint]
@@ -298,7 +157,7 @@ class DINOv3CompiledHarness:
         self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1).to(self.device)
 
     def extract_patch_features(self, imgs: list[torch.Tensor]) -> tuple[list[torch.Tensor], torch.Tensor, list[tuple[int, int]], list[tuple[int, int]]]:
-        imgs_resized, grid_sizes, original_sizes, scales, valids = preprocess_imgs(imgs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True)
+        imgs_resized, valids, _, grid_sizes, original_sizes, _, _ = resize_and_pad_images(imgs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True)
 
         with torch.no_grad():
             with torch.autocast(device_type=self.device.type, dtype=self.dtype):
@@ -339,8 +198,8 @@ class DINOv3CompiledHarness:
             seg = seg.to(self.device).bool()
             processed_segs.append(seg)
             
-        imgs_resized, masks_resized, overlaps_flat, px1, px2, py1, py2, valids = preprocess_imgs_w_masks(
-            images, processed_segs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True
+        imgs_resized, valids, pixel_mapper, grid_sizes, original_sizes, masks_resized, overlaps_flat = resize_and_pad_images(
+            images, masks=processed_segs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True
         )
 
         with torch.no_grad():
@@ -348,6 +207,21 @@ class DINOv3CompiledHarness:
                 outputs = self.model(imgs_resized)
             patch_tokens = outputs["x_norm_patchtokens"]
         
+        total_image_patch_h = total_image_patch_w = self.max_side_len // self.patch_size
+        y_coords = torch.arange(0, self.max_side_len, self.patch_size, dtype=torch.float32, device=self.device)
+        x_coords = torch.arange(0, self.max_side_len, self.patch_size, dtype=torch.float32, device=self.device)
+        
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        
+        py1_unscaled = grid_y.reshape(-1)
+        px1_unscaled = grid_x.reshape(-1)
+        
+        py2_unscaled = py1_unscaled + self.patch_size
+        px2_unscaled = px1_unscaled + self.patch_size
+
+        p1_unscaled = torch.stack([px1_unscaled, py1_unscaled], dim=-1)
+        p2_unscaled = torch.stack([px2_unscaled, py2_unscaled], dim=-1)
+
         dino_segmentations = []
         b = len(images)
         valids_flat = valids.view(b, -1)
@@ -359,10 +233,13 @@ class DINOv3CompiledHarness:
                 dino_segmentations.append([])
                 continue
             
-            img_px1 = torch.round(px1[img_idx, valid_indices]).int()
-            img_py1 = torch.round(py1[img_idx, valid_indices]).int()
-            img_px2 = torch.round(px2[img_idx, valid_indices]).int()
-            img_py2 = torch.round(py2[img_idx, valid_indices]).int()
+            p1_mapped = pixel_mapper(p1_unscaled[valid_indices], img_idx)
+            p2_mapped = pixel_mapper(p2_unscaled[valid_indices], img_idx)
+
+            img_px1 = torch.round(p1_mapped[..., 0]).int()
+            img_py1 = torch.round(p1_mapped[..., 1]).int()
+            img_px2 = torch.round(p2_mapped[..., 0]).int()
+            img_py2 = torch.round(p2_mapped[..., 1]).int()
 
             dino_bboxes = torch.stack([img_px1, img_py1, img_px2, img_py2], dim=1)
             dino_overlaps = overlaps_flat[img_idx, valid_indices]
@@ -383,7 +260,7 @@ class DINOv3CompiledHarness:
                 batched_images = batched_images.float() / 255.0
             batched_images = (batched_images - self.mean) / self.std
         else:
-            batched_images, _, _, _, _ = preprocess_imgs(imgs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True)
+            batched_images, _, _, _, _, _, _ = resize_and_pad_images(imgs, max_side_len=self.max_side_len, patch_size=self.patch_size, normalize=True)
 
         with torch.no_grad():
             with torch.autocast(device_type=self.device.type, dtype=self.dtype):
