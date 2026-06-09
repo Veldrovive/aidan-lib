@@ -470,7 +470,7 @@ def generate_video_segmentation(
 
         for i in range(len(frame_batch)):
             global_frame_num = frame_numbers[i]
-            if global_frame_num == last_global_frame:
+            if global_frame_num <= last_global_frame:
                 continue
             last_global_frame = global_frame_num
             
