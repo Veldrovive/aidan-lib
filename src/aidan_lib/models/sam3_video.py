@@ -22,6 +22,7 @@ from multiprocessing import shared_memory, resource_tracker
 from multiprocessing.connection import Listener, Client
 import contextlib
 from dataclasses import dataclass
+import traceback
 
 try:
     from sam3.model_builder import build_sam3_multiplex_video_predictor
@@ -438,7 +439,18 @@ def generate_video_segmentation(
                             has_objects = True
                 
                 if has_objects:
-                    out = harness.propagate_session(session_id=session_id)
+                    try:
+                        out = harness.propagate_session(session_id=session_id)
+                    except RuntimeError as e:
+                        # This is ugly, but we want to check specifically for a string in the error
+                        # "No points are provided; please add points first"
+                        # I don't know what causes this, but we can ignore it
+                        if "add points" in str(e):
+                            traceback.print_exc()
+                            print(f"WARNING: {e}")
+                            out = None
+                        else:
+                            raise e
                 else:
                     out = None
                 
