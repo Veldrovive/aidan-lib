@@ -302,14 +302,16 @@ def compute_overlap_ids(
     overlap_frames: list[int], 
     last_out: SAM3VideoOutput, 
     cur_out: SAM3VideoOutput, 
-    iou_thresh: float = 0.9
+    iou_thresh: float = 0.5
 ) -> list[tuple[int, int]]:
     """
     Returns a list of equality tuples.
     (last_obj_id, cur_obj_id) where we know that these refer to the same object
     """
 
-    equality_counts = {}
+    intersections = {}
+    unions = {}
+    
     for global_frame in overlap_frames:
         last_frame_index = last_out.video_frame_indices.index(global_frame)
         cur_frame_index = cur_out.video_frame_indices.index(global_frame)
@@ -328,26 +330,38 @@ def compute_overlap_ids(
                     continue
 
                 key = (int(last_obj_id), int(cur_obj_id))
-                if key not in equality_counts:
-                    equality_counts[key] = 0
-
                 cur_mask = cur_seg == cur_obj_id
 
-                intersection = np.count_nonzero(last_mask & cur_mask)
-                
+                intersection = int(np.count_nonzero(last_mask & cur_mask))
                 if intersection == 0:
                     continue
 
-                union = np.count_nonzero(last_mask | cur_mask)
-                iou = intersection / union
+                union = int(np.count_nonzero(last_mask | cur_mask))
+                
+                intersections[key] = intersections.get(key, 0) + intersection
+                unions[key] = unions.get(key, 0) + union
 
-                if iou > iou_thresh:
-                    equality_counts[key] += 1
+    # Compute 3D (volumetric) IoU for all candidate pairs
+    ious = {}
+    for key in intersections.keys():
+        if unions[key] > 0:
+            iou = intersections[key] / unions[key]
+            if iou > iou_thresh:
+                ious[key] = iou
 
+    # Greedy 1-to-1 matching to prevent multiple assignments
     equalities = []
-    for key, equality_count in equality_counts.items():
-        if equality_count == len(overlap_frames):
-            equalities.append(key)
+    matched_last = set()
+    matched_cur = set()
+    
+    # Sort by IoU descending
+    sorted_pairs = sorted(ious.items(), key=lambda x: x[1], reverse=True)
+    
+    for (last_obj_id, cur_obj_id), iou in sorted_pairs:
+        if last_obj_id not in matched_last and cur_obj_id not in matched_cur:
+            equalities.append((last_obj_id, cur_obj_id))
+            matched_last.add(last_obj_id)
+            matched_cur.add(cur_obj_id)
 
     return equalities
 
@@ -357,7 +371,7 @@ def generate_video_segmentation(
     batch_frame_loader: Iterable,
     num_prompt_applications: int = 1,
     prompt_frame_spacing: Literal["space_around", "space_between"] = "space_between",
-    iou_thresh: float = 0.9
+    iou_thresh: float = 0.5
 ) -> Generator[FrameSegmentationInfo, None, None]:
     if isinstance(prompts, str):
         prompts = [prompts]
