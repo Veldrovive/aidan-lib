@@ -88,12 +88,41 @@ class BaseSAM3Harness(ABC):
     ) -> SAM3VideoOutput:
         session_id = self.start_session(video, frame_numbers, offload_state_to_cpu, store_session=False)
         try:
-            if isinstance(prompt, list):
-                for p in prompt:
-                    self.add_prompt(p, prompt_frame, session_id)
+            prompts = prompt if isinstance(prompt, list) else [prompt]
+            has_objects = False
+            
+            for p in prompts:
+                resp = self.add_prompt(p, prompt_frame, session_id)
+                if resp is not None and "outputs" in resp:
+                    if len(resp["outputs"].get("out_obj_ids", [])) > 0:
+                        has_objects = True
+            
+            if has_objects:
+                output = self.propagate_session(session_id)
             else:
-                self.add_prompt(prompt, prompt_frame, session_id)
-            output = self.propagate_session(session_id)
+                if isinstance(video, list):
+                    frame0 = video[0]
+                    width, height = frame0.size
+                    n_frames = len(video)
+                else:
+                    import cv2
+                    cap = cv2.VideoCapture(str(video))
+                    ret, frame = cap.read()
+                    if not ret:
+                        raise ValueError(f"Could not read video {video}")
+                    height, width = frame.shape[:2]
+                    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap.release()
+                
+                if frame_numbers is None:
+                    frame_numbers = list(range(n_frames))
+                
+                output = SAM3VideoOutput(
+                    segmentation=np.full((n_frames, height, width), SAM3VideoOutput.background_index, dtype=SEG_ID_TYPE),
+                    confidences=[dict() for _ in range(n_frames)],
+                    obj_id_to_prompt={},
+                    video_frame_indices=list(frame_numbers),
+                )
         finally:
             self.close_session(session_id)
 
@@ -401,38 +430,47 @@ def generate_video_segmentation(
                 raise ValueError(f"Unknown prompt_frame_spacing: {prompt_frame_spacing}")
 
             for prompt in prompts:
+                has_objects = False
                 for idx in prompt_indices:
-                    harness.add_prompt(prompt, frame_index=idx, session_id=session_id)
-                out = harness.propagate_session(session_id=session_id)
+                    resp = harness.add_prompt(prompt, frame_index=idx, session_id=session_id)
+                    if resp is not None and "outputs" in resp:
+                        if len(resp["outputs"].get("out_obj_ids", [])) > 0:
+                            has_objects = True
                 
-                if combined_out is None:
-                    combined_out = SAM3VideoOutput(
-                        segmentation=np.full_like(out.segmentation, out.background_index),
-                        confidences=[dict() for _ in range(len(out.confidences))],
-                        obj_id_to_prompt={},
-                        video_frame_indices=out.video_frame_indices,
-                    )
+                if has_objects:
+                    out = harness.propagate_session(session_id=session_id)
+                else:
+                    out = None
                 
-                unique_ids = np.unique(out.segmentation)
-                unique_ids = unique_ids[unique_ids != out.background_index]
-                
-                if len(unique_ids) > 0:
-                    obj_id_to_new_id = {}
-                    for obj_id in unique_ids:
-                        obj_id_to_new_id[obj_id] = next_combined_id
-                        next_combined_id += 1
-                        
-                    for frame_idx in range(len(out.segmentation)):
-                        seg = out.segmentation[frame_idx]
+                if out is not None:
+                    if combined_out is None:
+                        combined_out = SAM3VideoOutput(
+                            segmentation=np.full_like(out.segmentation, out.background_index),
+                            confidences=[dict() for _ in range(len(out.confidences))],
+                            obj_id_to_prompt={},
+                            video_frame_indices=out.video_frame_indices,
+                        )
+                    
+                    unique_ids = np.unique(out.segmentation)
+                    unique_ids = unique_ids[unique_ids != out.background_index]
+                    
+                    if len(unique_ids) > 0:
+                        obj_id_to_new_id = {}
                         for obj_id in unique_ids:
-                            new_id = obj_id_to_new_id[obj_id]
-                            mask = (seg == obj_id)
-                            combined_out.segmentation[frame_idx][mask] = new_id
+                            obj_id_to_new_id[obj_id] = next_combined_id
+                            next_combined_id += 1
                             
-                            if obj_id in out.confidences[frame_idx]:
-                                combined_out.confidences[frame_idx][new_id] = out.confidences[frame_idx][obj_id]
-                            
-                            combined_out.obj_id_to_prompt[new_id] = prompt
+                        for frame_idx in range(len(out.segmentation)):
+                            seg = out.segmentation[frame_idx]
+                            for obj_id in unique_ids:
+                                new_id = obj_id_to_new_id[obj_id]
+                                mask = (seg == obj_id)
+                                combined_out.segmentation[frame_idx][mask] = new_id
+                                
+                                if obj_id in out.confidences[frame_idx]:
+                                    combined_out.confidences[frame_idx][new_id] = out.confidences[frame_idx][obj_id]
+                                
+                                combined_out.obj_id_to_prompt[new_id] = prompt
 
                 harness.reset_session(session_id=session_id)
         finally:
@@ -440,7 +478,18 @@ def generate_video_segmentation(
             
         out = combined_out
         if out is None:
-            raise RuntimeError("No outputs generated. Are prompts empty?")
+            frame0 = frame_batch[0]
+            if isinstance(frame0, Image.Image):
+                width, height = frame0.size
+            else:
+                height, width = frame0.shape[:2]
+            
+            out = SAM3VideoOutput(
+                segmentation=np.full((len(frame_batch), height, width), SAM3VideoOutput.background_index, dtype=SEG_ID_TYPE),
+                confidences=[dict() for _ in range(len(frame_batch))],
+                obj_id_to_prompt={},
+                video_frame_indices=list(frame_numbers),
+            )
 
         if last_frame_numbers_set:
             overlap = last_frame_numbers_set.intersection(new_frame_numbers_set)
