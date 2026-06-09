@@ -4,7 +4,7 @@ import tempfile
 import itertools
 import json
 from pathlib import Path
-from typing import Iterable, Generator, NamedTuple, TypedDict
+from typing import Iterable, Generator, NamedTuple, TypedDict, Literal
 import cv2
 import imageio.v3 as iio
 import numpy as np
@@ -355,6 +355,8 @@ def generate_video_segmentation(
     harness: BaseSAM3Harness,
     prompts: list[str] | str,
     batch_frame_loader: Iterable,
+    num_prompt_applications: int = 1,
+    prompt_frame_spacing: Literal["space_around", "space_between"] = "space_between",
     iou_thresh: float = 0.9
 ) -> Generator[FrameSegmentationInfo, None, None]:
     if isinstance(prompts, str):
@@ -376,8 +378,20 @@ def generate_video_segmentation(
         next_combined_id = 0
 
         try:
+            n = len(frame_batch)
+            if prompt_frame_spacing == "space_around":
+                prompt_indices = [int(n * (i + 1) / (num_prompt_applications + 1)) for i in range(num_prompt_applications)]
+            elif prompt_frame_spacing == "space_between":
+                if num_prompt_applications == 1:
+                    prompt_indices = [0]
+                else:
+                    prompt_indices = [int((n - 1) * i / (num_prompt_applications - 1)) for i in range(num_prompt_applications)]
+            else:
+                raise ValueError(f"Unknown prompt_frame_spacing: {prompt_frame_spacing}")
+
             for prompt in prompts:
-                harness.add_prompt(prompt, session_id=session_id)
+                for idx in prompt_indices:
+                    harness.add_prompt(prompt, frame_index=idx, session_id=session_id)
                 out = harness.propagate_session(session_id=session_id)
                 
                 if combined_out is None:
