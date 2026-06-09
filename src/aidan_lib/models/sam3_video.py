@@ -333,9 +333,6 @@ def compute_overlap_ids(
                 cur_mask = cur_seg == cur_obj_id
 
                 intersection = int(np.count_nonzero(last_mask & cur_mask))
-                if intersection == 0:
-                    continue
-
                 union = int(np.count_nonzero(last_mask | cur_mask))
                 
                 intersections[key] = intersections.get(key, 0) + intersection
