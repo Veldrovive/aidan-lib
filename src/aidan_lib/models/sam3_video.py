@@ -37,14 +37,12 @@ TextPrompt = str
 
 VideoSegmentation = Int[np.ndarray, "n_frames height width"]
 VideoConfidences = list[dict[int, float]]  # Length equals n_frames
-VideoPrompts = dict[int, str]  # Maps from tracklet id to prompt text
 
 @dataclass
 class SAM3VideoOutput:
     background_index = BACKGROUND_SEG_ID
     segmentation: VideoSegmentation
     confidences: VideoConfidences
-    obj_id_to_prompt: VideoPrompts
     video_frame_indices: list[int]
 
 
@@ -121,7 +119,6 @@ class BaseSAM3Harness(ABC):
                 output = SAM3VideoOutput(
                     segmentation=np.full((n_frames, height, width), SAM3VideoOutput.background_index, dtype=SEG_ID_TYPE),
                     confidences=[dict() for _ in range(n_frames)],
-                    obj_id_to_prompt={},
                     video_frame_indices=list(frame_numbers),
                 )
         finally:
@@ -296,7 +293,6 @@ class SAM3Harness(BaseSAM3Harness):
 
         output_frame_indices = sorted(outputs.keys())
 
-        prompts = {}
         for input_frame_num, output_frame_num in enumerate(output_frame_indices):
             frame_out = outputs[output_frame_num]
             video_frame_indices.append(output_frame_num)
@@ -309,12 +305,10 @@ class SAM3Harness(BaseSAM3Harness):
                 
                 mask_locations = np.where(mask)
                 segmentation[input_frame_num, mask_locations[0], mask_locations[1]] = obj_id
-                prompts[obj_id] = current_prompt
 
         video_output = SAM3VideoOutput(
             segmentation=segmentation,
             confidences=confidences,
-            obj_id_to_prompt=prompts,
             video_frame_indices=video_frame_indices,
         )
 
@@ -324,9 +318,8 @@ class SAM3Harness(BaseSAM3Harness):
 class FrameSegmentationInfo(NamedTuple):
     global_frame_num: int
     frame: np.ndarray | Image.Image
-    segmentation: np.ndarray
+    segmentations: dict[str, np.ndarray]
     background_index: int
-    obj_id_to_prompt: dict[int, str]
 
 def compute_overlap_ids(
     overlap_frames: list[int], 
@@ -355,10 +348,6 @@ def compute_overlap_ids(
         for last_obj_id in last_visible_obj_ids:
             last_mask = last_seg == last_obj_id
             for cur_obj_id in cur_visible_obj_ids:
-                # Only check for overlap if the prompts match
-                if last_out.obj_id_to_prompt.get(last_obj_id) != cur_out.obj_id_to_prompt.get(cur_obj_id):
-                    continue
-
                 key = (int(last_obj_id), int(cur_obj_id))
                 cur_mask = cur_seg == cur_obj_id
 
@@ -404,10 +393,9 @@ def generate_video_segmentation(
         prompts = [prompts]
 
     last_frame_numbers_set: set | None = None
-    last_out: SAM3VideoOutput | None = None
+    last_outs: dict[str, SAM3VideoOutput] | None = None
     next_unique_id = 0
-    last_obj_id_unique_id_assignments: dict | None = None
-    global_unique_id_to_prompt: dict[int, str] = {}
+    last_obj_id_unique_id_assignments: dict[str, dict] | None = None
 
     last_global_frame = -1
     for frame_batch, frame_numbers, scene_done in batch_frame_loader:
@@ -415,8 +403,7 @@ def generate_video_segmentation(
 
         session_id = harness.start_session(frame_batch, frame_numbers=frame_numbers, offload_state_to_cpu=None, store_session=False)
         
-        combined_out = None
-        next_combined_id = 0
+        outs: dict[str, SAM3VideoOutput] = {}
 
         try:
             n = len(frame_batch)
@@ -455,90 +442,67 @@ def generate_video_segmentation(
                     out = None
                 
                 if out is not None:
-                    if combined_out is None:
-                        combined_out = SAM3VideoOutput(
-                            segmentation=np.full_like(out.segmentation, out.background_index),
-                            confidences=[dict() for _ in range(len(out.confidences))],
-                            obj_id_to_prompt={},
-                            video_frame_indices=out.video_frame_indices,
-                        )
-                    
-                    unique_ids = np.unique(out.segmentation)
-                    unique_ids = unique_ids[unique_ids != out.background_index]
-                    
-                    if len(unique_ids) > 0:
-                        obj_id_to_new_id = {}
-                        for obj_id in unique_ids:
-                            obj_id_to_new_id[obj_id] = next_combined_id
-                            next_combined_id += 1
-                            
-                        for frame_idx in range(len(out.segmentation)):
-                            seg = out.segmentation[frame_idx]
-                            for obj_id in unique_ids:
-                                new_id = obj_id_to_new_id[obj_id]
-                                mask = (seg == obj_id)
-                                combined_out.segmentation[frame_idx][mask] = new_id
-                                
-                                if obj_id in out.confidences[frame_idx]:
-                                    combined_out.confidences[frame_idx][new_id] = out.confidences[frame_idx][obj_id]
-                                
-                                combined_out.obj_id_to_prompt[new_id] = prompt
+                    outs[prompt] = out
 
                 harness.reset_session(session_id=session_id)
         finally:
             harness.close_session(session_id=session_id)
             
-        out = combined_out
-        if out is None:
-            frame0 = frame_batch[0]
-            if isinstance(frame0, Image.Image):
-                width, height = frame0.size
-            else:
-                height, width = frame0.shape[:2]
+        frame0 = frame_batch[0]
+        if isinstance(frame0, Image.Image):
+            width, height = frame0.size
+        else:
+            height, width = frame0.shape[:2]
             
-            out = SAM3VideoOutput(
-                segmentation=np.full((len(frame_batch), height, width), SAM3VideoOutput.background_index, dtype=SEG_ID_TYPE),
-                confidences=[dict() for _ in range(len(frame_batch))],
-                obj_id_to_prompt={},
-                video_frame_indices=list(frame_numbers),
-            )
+        for prompt in prompts:
+            if prompt not in outs:
+                outs[prompt] = SAM3VideoOutput(
+                    segmentation=np.full((len(frame_batch), height, width), SAM3VideoOutput.background_index, dtype=SEG_ID_TYPE),
+                    confidences=[dict() for _ in range(len(frame_batch))],
+                    video_frame_indices=list(frame_numbers),
+                )
 
         if last_frame_numbers_set:
             overlap = last_frame_numbers_set.intersection(new_frame_numbers_set)
-            assert last_out is not None
-            equalities = compute_overlap_ids(list(overlap), last_out, out, iou_thresh=iou_thresh)
-            cur_obj_id_to_prev_obj_id = {cur_obj_id: last_obj_id for (last_obj_id, cur_obj_id) in equalities}
+            assert last_outs is not None
+            cur_obj_id_to_prev_obj_id: dict[str, dict] = {}
+            for prompt in prompts:
+                equalities = compute_overlap_ids(list(overlap), last_outs[prompt], outs[prompt], iou_thresh=iou_thresh)
+                cur_obj_id_to_prev_obj_id[prompt] = {cur_obj_id: last_obj_id for (last_obj_id, cur_obj_id) in equalities}
         else:
-            cur_obj_id_to_prev_obj_id = {}
+            cur_obj_id_to_prev_obj_id = {prompt: {} for prompt in prompts}
 
         # Now we need to assign the object ids to unique ids
-        seg = out.segmentation
-        obj_ids = [int(obj_id) for obj_id in np.unique(seg) if obj_id != out.background_index]
-        obj_id_to_unique_id_assignments = {}
-        for cur_obj_id in obj_ids:
-            # First, we see if there is a match to an old segmentation
-            last_obj_id = cur_obj_id_to_prev_obj_id.get(cur_obj_id, None)
-            if last_obj_id is None:
-                unique_id = next_unique_id
-                next_unique_id += 1
-            else:
-                assert last_obj_id_unique_id_assignments is not None
-                unique_id = last_obj_id_unique_id_assignments[last_obj_id]
-            obj_id_to_unique_id_assignments[cur_obj_id] = unique_id
+        obj_id_to_unique_id_assignments: dict[str, dict] = {}
+        lookup_tables: dict[str, np.ndarray] = {}
+        for prompt in prompts:
+            out = outs[prompt]
+            seg = out.segmentation
+            obj_ids = [int(obj_id) for obj_id in np.unique(seg) if obj_id != out.background_index]
+            assignments = {}
+            for cur_obj_id in obj_ids:
+                # First, we see if there is a match to an old segmentation
+                last_obj_id = cur_obj_id_to_prev_obj_id[prompt].get(cur_obj_id, None)
+                if last_obj_id is None:
+                    unique_id = next_unique_id
+                    next_unique_id += 1
+                else:
+                    assert last_obj_id_unique_id_assignments is not None
+                    unique_id = last_obj_id_unique_id_assignments[prompt][last_obj_id]
+                assignments[cur_obj_id] = unique_id
 
-        max_obj_id = int(np.max(seg)) if len(obj_ids) > 0 else out.background_index
-        
-        for cur_obj_id, unique_id in obj_id_to_unique_id_assignments.items():
-            if unique_id not in global_unique_id_to_prompt:
-                global_unique_id_to_prompt[unique_id] = out.obj_id_to_prompt.get(cur_obj_id, "UNKNOWN")
-
-        # Create a lookup table initialized to map to itself by default
-        lookup_table_size = max(max_obj_id, out.background_index) + 1
-        lookup_table = np.arange(lookup_table_size, dtype=np.int32)
-        
-        # Populate the lookup table with the dictionary assignments
-        for old_id, new_id in obj_id_to_unique_id_assignments.items():
-            lookup_table[old_id] = new_id
+            max_obj_id = int(np.max(seg)) if len(obj_ids) > 0 else out.background_index
+            
+            # Create a lookup table initialized to map to itself by default
+            lookup_table_size = max(max_obj_id, out.background_index) + 1
+            lookup_table = np.arange(lookup_table_size, dtype=np.int32)
+            
+            # Populate the lookup table with the dictionary assignments
+            for old_id, new_id in assignments.items():
+                lookup_table[old_id] = new_id
+                
+            obj_id_to_unique_id_assignments[prompt] = assignments
+            lookup_tables[prompt] = lookup_table
 
         for i in range(len(frame_batch)):
             global_frame_num = frame_numbers[i]
@@ -547,19 +511,19 @@ def generate_video_segmentation(
             last_global_frame = global_frame_num
             
             frame = frame_batch[i]
-            frame_seg = out.segmentation[i]
             
-            # Map the segmentation which uses obj ids to unique ids 
-            # This applies the mapping to the entire 2D mask instantly
-            unique_frame_seg = lookup_table[frame_seg]
+            frame_segmentations = {}
+            for prompt in prompts:
+                frame_seg = outs[prompt].segmentation[i]
+                frame_segmentations[prompt] = lookup_tables[prompt][frame_seg]
 
-            yield FrameSegmentationInfo(global_frame_num, frame, unique_frame_seg, out.background_index, global_unique_id_to_prompt)
+            yield FrameSegmentationInfo(global_frame_num, frame, frame_segmentations, SAM3VideoOutput.background_index)
 
         if scene_done:
             last_frame_numbers_set = None
-            last_out = None
+            last_outs = None
             last_obj_id_unique_id_assignments = None
         else:
             last_frame_numbers_set = new_frame_numbers_set
-            last_out = out
+            last_outs = outs
             last_obj_id_unique_id_assignments = obj_id_to_unique_id_assignments
